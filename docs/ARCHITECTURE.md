@@ -27,6 +27,10 @@ Neither JUMI nor AH should treat this helper as part of their service image.
 NodeVault or NodeKit may later own the actual base-image packaging that embeds this
 helper.
 
+JUMI itself, as a Kubernetes data-plane service app, should move toward `ko` for its
+service-image build path. That `ko` direction does not imply that this helper belongs
+inside the JUMI service image.
+
 ## v0 Runtime Behavior
 
 The helper should:

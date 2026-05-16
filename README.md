@@ -19,6 +19,17 @@ It does not own:
 - pipeline scheduling policy
 - the long-term node runtime base image packaging pipeline
 
+## Relationship To ko
+
+Kubernetes data-plane service apps such as JUMI are expected to standardize on `ko`
+for their service-image builds.
+
+This repository is adjacent to that policy, but not identical to it.
+
+- JUMI service image: should follow the `ko`-based data-plane app build direction
+- `node-artifact-runtime`: runtime-side helper contract, not a JUMI service image
+- base image packaging: may be handled by NodeVault or NodeKit using this contract
+
 ## Intended Model
 
 tool image
