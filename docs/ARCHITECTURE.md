@@ -2,7 +2,9 @@
 
 ## Purpose
 
-`node-artifact-runtime` is a runtime-side executable for DAG node containers.
+`node-artifact-runtime` is the project/repository name.
+
+`nan` is the runtime-side executable for DAG node containers.
 
 It exists to align files generated inside a node runtime container with the artifact
 contract consumed by JUMI and AH.
@@ -48,7 +50,7 @@ helper binary.
 
 ```text
 published runtime base image
-  - /usr/local/bin/node-artifact-runtime
+  - /usr/local/bin/nan
 ```
 
 This repository documents the contract that such a base image must satisfy.
@@ -57,4 +59,5 @@ It does not need to own the base-image packaging pipeline itself.
 ## Migration Note
 
 JUMI currently still carries a legacy helper named `jumi-output-helper` for smoke/dev
-compatibility. The intended long-term runtime-side name is `node-artifact-runtime`.
+compatibility. The intended long-term runtime-side executable name is `nan`, provided
+by the `node-artifact-runtime` project.

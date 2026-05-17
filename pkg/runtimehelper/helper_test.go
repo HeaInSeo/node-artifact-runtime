@@ -19,7 +19,9 @@ func TestRunWritesManifestAndTerminationLog(t *testing.T) {
 		RunID:              "run-1",
 		SampleRunID:        "sample-1",
 		NodeID:             "produce",
-		OutputNames:        []string{"report"},
+		AttemptID:          "attempt-1",
+		ContainerName:      "main",
+		Outputs:            []OutputSpec{{Name: "report", Path: "report", Required: true, Type: "file"}},
 		OutputRoot:         tmpDir,
 		ManifestPath:       manifestPath,
 		TerminationLogPath: terminationPath,
@@ -41,9 +43,18 @@ func TestRunWritesManifestAndTerminationLog(t *testing.T) {
 	if len(manifest.Artifacts) != 1 {
 		t.Fatalf("artifact count = %d, want 1", len(manifest.Artifacts))
 	}
+	if manifest.SchemaVersion != provenance.ArtifactManifestSchemaVersion {
+		t.Fatalf("schemaVersion = %q, want %q", manifest.SchemaVersion, provenance.ArtifactManifestSchemaVersion)
+	}
+	if manifest.AttemptID != "attempt-1" {
+		t.Fatalf("attemptId = %q, want attempt-1", manifest.AttemptID)
+	}
 	record := manifest.Artifacts[0]
 	if record.OutputName != "report" {
 		t.Fatalf("outputName = %q, want report", record.OutputName)
+	}
+	if record.DeclaredPath != "report" {
+		t.Fatalf("declaredPath = %q, want report", record.DeclaredPath)
 	}
 	if record.SizeBytes != 10 {
 		t.Fatalf("sizeBytes = %d, want 10", record.SizeBytes)
@@ -67,7 +78,7 @@ func TestRunPropagatesChildExitCode(t *testing.T) {
 	exitCode := Run(context.Background(), Config{
 		RunID:        "run-2",
 		NodeID:       "produce",
-		OutputNames:  []string{"report"},
+		Outputs:      []OutputSpec{{Name: "report", Path: "report", Required: true, Type: "file"}},
 		OutputRoot:   tmpDir,
 		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
 		Command:      []string{"sh", "-c", "exit 17"},
@@ -84,5 +95,51 @@ func TestParseOutputNames(t *testing.T) {
 	}
 	if got[0] != "report" || got[1] != "metrics" || got[2] != "traces" {
 		t.Fatalf("ParseOutputNames() = %#v", got)
+	}
+}
+
+func TestInspectFailsOnMissingRequiredOutput(t *testing.T) {
+	tmpDir := t.TempDir()
+	exitCode := Inspect(Config{
+		RunID:        "run-3",
+		NodeID:       "produce",
+		Outputs:      []OutputSpec{{Name: "report", Path: "missing.txt", Required: true, Type: "file"}},
+		OutputRoot:   tmpDir,
+		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+	})
+	if exitCode != ExitMissingRequiredOutput {
+		t.Fatalf("Inspect() exitCode = %d, want %d", exitCode, ExitMissingRequiredOutput)
+	}
+}
+
+func TestInspectRejectsEscapingOutputPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	exitCode := Inspect(Config{
+		RunID:        "run-4",
+		NodeID:       "produce",
+		Outputs:      []OutputSpec{{Name: "report", Path: "../escape.txt", Required: true, Type: "file"}},
+		OutputRoot:   tmpDir,
+		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+	})
+	if exitCode != ExitInvalidOutputPath {
+		t.Fatalf("Inspect() exitCode = %d, want %d", exitCode, ExitInvalidOutputPath)
+	}
+}
+
+func TestInspectRejectsDirectoryOutput(t *testing.T) {
+	tmpDir := t.TempDir()
+	dirPath := filepath.Join(tmpDir, "dir-output")
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+		t.Fatalf("mkdir dir output: %v", err)
+	}
+	exitCode := Inspect(Config{
+		RunID:        "run-5",
+		NodeID:       "produce",
+		Outputs:      []OutputSpec{{Name: "report", Path: "dir-output", Required: true, Type: "file"}},
+		OutputRoot:   tmpDir,
+		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+	})
+	if exitCode != ExitUnsupportedOutputType {
+		t.Fatalf("Inspect() exitCode = %d, want %d", exitCode, ExitUnsupportedOutputType)
 	}
 }

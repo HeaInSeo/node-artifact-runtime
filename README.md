@@ -8,7 +8,7 @@ This repository is intentionally separate from JUMI and AH.
 
 It owns:
 
-- the `node-artifact-runtime` helper binary
+- the `nan` runtime shim provided by the `node-artifact-runtime` project
 - JUMI/AH integration contract docs
 - contract tests for runtime-side artifact export
 
@@ -32,6 +32,15 @@ This repository is adjacent to that policy, but not identical to it.
 
 ## Intended Model
 
+Repository/product name:
+
+- `node-artifact-runtime`
+
+Runtime executable name:
+
+- `nan`
+
+```text
 tool image
   FROM <NodeVault or NodeKit published runtime base image>
   installs bwa or gatk or samtools or python toolchain
@@ -40,7 +49,7 @@ tool image
 The helper runs inside the DAG node runtime container and wraps the user command:
 
 ```text
-/usr/local/bin/node-artifact-runtime -- <user command>
+/usr/local/bin/nan run --contract /jumi/node-contract.json -- <user command>
 ```
 
 ## Current Status
@@ -55,6 +64,12 @@ the migration. Code and build definitions will be moved here incrementally.
 
 - `cmd/node-artifact-runtime`: future helper entrypoint
 - `docs`: architecture and migration notes
+
+Key docs:
+
+- `docs/NAN_RUNTIME_SHIM_DESIGN.md`
+- `docs/ARCHITECTURE.md`
+- `docs/MIGRATION_FROM_JUMI.md`
 
 ## Near-Term Tasks
 

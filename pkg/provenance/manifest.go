@@ -6,16 +6,29 @@ import (
 )
 
 const DefaultArtifactsManifestPath = "/out/_meta/artifacts.manifest.json"
+const ArtifactManifestSchemaVersion = "nan.artifactManifest.v1"
 
 type ArtifactManifest struct {
-	Artifacts []ArtifactRecord `json:"artifacts"`
+	SchemaVersion string           `json:"schemaVersion,omitempty"`
+	RunID         string           `json:"runId,omitempty"`
+	SampleRunID   string           `json:"sampleRunId,omitempty"`
+	NodeID        string           `json:"nodeId,omitempty"`
+	AttemptID     string           `json:"attemptId,omitempty"`
+	ContainerName string           `json:"containerName,omitempty"`
+	NanVersion    string           `json:"nanVersion,omitempty"`
+	CreatedAt     string           `json:"createdAt,omitempty"`
+	OutputRoot    string           `json:"outputRoot,omitempty"`
+	Artifacts     []ArtifactRecord `json:"artifacts"`
 }
 
 type ArtifactRecord struct {
-	OutputName string `json:"outputName"`
-	URI        string `json:"uri,omitempty"`
-	Digest     string `json:"digest,omitempty"`
-	SizeBytes  int64  `json:"sizeBytes,omitempty"`
+	OutputName   string `json:"outputName"`
+	DeclaredPath string `json:"declaredPath,omitempty"`
+	AbsolutePath string `json:"absolutePath,omitempty"`
+	URI          string `json:"uri,omitempty"`
+	Digest       string `json:"digest,omitempty"`
+	SizeBytes    int64  `json:"sizeBytes,omitempty"`
+	Type         string `json:"type,omitempty"`
 }
 
 func ParseArtifactManifest(data []byte) (ArtifactManifest, error) {
