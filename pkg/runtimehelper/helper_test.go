@@ -68,8 +68,15 @@ func TestRunWritesManifestAndTerminationLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read termination log: %v", err)
 	}
-	if string(terminationRaw) == "" {
-		t.Fatal("termination log = empty, want manifest JSON")
+	var summary TerminationSummary
+	if err := json.Unmarshal(terminationRaw, &summary); err != nil {
+		t.Fatalf("unmarshal termination summary: %v", err)
+	}
+	if summary.Status != "succeeded" {
+		t.Fatalf("termination status = %q, want succeeded", summary.Status)
+	}
+	if summary.ManifestPath != manifestPath {
+		t.Fatalf("termination manifestPath = %q, want %q", summary.ManifestPath, manifestPath)
 	}
 }
 
@@ -141,5 +148,36 @@ func TestInspectRejectsDirectoryOutput(t *testing.T) {
 	})
 	if exitCode != ExitUnsupportedOutputType {
 		t.Fatalf("Inspect() exitCode = %d, want %d", exitCode, ExitUnsupportedOutputType)
+	}
+}
+
+func TestRunWritesFailureSummaryOnCommandFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	terminationPath := filepath.Join(tmpDir, "termination.log")
+	exitCode := Run(context.Background(), Config{
+		RunID:              "run-6",
+		NodeID:             "produce",
+		Outputs:            []OutputSpec{{Name: "report", Path: "report", Required: true, Type: "file"}},
+		OutputRoot:         tmpDir,
+		ManifestPath:       filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		TerminationLogPath: terminationPath,
+		Command:            []string{"sh", "-c", "exit 19"},
+	})
+	if exitCode != 19 {
+		t.Fatalf("Run() exitCode = %d, want 19", exitCode)
+	}
+	raw, err := os.ReadFile(terminationPath)
+	if err != nil {
+		t.Fatalf("read termination log: %v", err)
+	}
+	var summary TerminationSummary
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		t.Fatalf("unmarshal termination summary: %v", err)
+	}
+	if summary.Status != "command_failed" {
+		t.Fatalf("termination status = %q, want command_failed", summary.Status)
+	}
+	if summary.ExitCode != 19 {
+		t.Fatalf("termination exitCode = %d, want 19", summary.ExitCode)
 	}
 }

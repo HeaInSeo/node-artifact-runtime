@@ -50,6 +50,16 @@ type OutputSpec struct {
 	Type     string
 }
 
+type TerminationSummary struct {
+	Status       string `json:"status"`
+	ExitCode     int    `json:"exitCode"`
+	RunID        string `json:"runId,omitempty"`
+	NodeID       string `json:"nodeId,omitempty"`
+	AttemptID    string `json:"attemptId,omitempty"`
+	ManifestPath string `json:"manifestPath,omitempty"`
+	Message      string `json:"message,omitempty"`
+}
+
 // Config describes the runtime-side artifact helper contract executed inside
 // the DAG node runtime container after wrapping the user command.
 type Config struct {
@@ -88,33 +98,103 @@ func (c Config) Validate() error {
 func Run(ctx context.Context, cfg Config) int {
 	if err := cfg.Validate(); err != nil {
 		_, _ = fmt.Fprintln(stderrOrDefault(cfg.Stderr), err)
+		writeTerminationSummary(cfg, TerminationSummary{
+			Status:    "invalid_config",
+			ExitCode:  ExitInvalidConfig,
+			RunID:     cfg.RunID,
+			NodeID:    cfg.NodeID,
+			AttemptID: cfg.AttemptID,
+			Message:   err.Error(),
+		})
 		return ExitInvalidConfig
 	}
 	if len(cfg.Command) == 0 {
-		_, _ = fmt.Fprintln(stderrOrDefault(cfg.Stderr), "invalid config: command is required")
+		msg := "invalid config: command is required"
+		_, _ = fmt.Fprintln(stderrOrDefault(cfg.Stderr), msg)
+		writeTerminationSummary(cfg, TerminationSummary{
+			Status:    "invalid_command",
+			ExitCode:  ExitInvalidCommand,
+			RunID:     cfg.RunID,
+			NodeID:    cfg.NodeID,
+			AttemptID: cfg.AttemptID,
+			Message:   msg,
+		})
 		return ExitInvalidCommand
 	}
 
 	if err := executeCommand(ctx, cfg); err != nil {
-		return exitCode(err)
+		code := exitCode(err)
+		writeTerminationSummary(cfg, TerminationSummary{
+			Status:    "command_failed",
+			ExitCode:  code,
+			RunID:     cfg.RunID,
+			NodeID:    cfg.NodeID,
+			AttemptID: cfg.AttemptID,
+			Message:   err.Error(),
+		})
+		return code
 	}
 
 	if err := EmitArtifacts(cfg); err != nil {
 		_, _ = fmt.Fprintln(stderrOrDefault(cfg.Stderr), err)
-		return classifyHelperError(err)
+		code := classifyHelperError(err)
+		writeTerminationSummary(cfg, TerminationSummary{
+			Status:       "inspect_failed",
+			ExitCode:     code,
+			RunID:        cfg.RunID,
+			NodeID:       cfg.NodeID,
+			AttemptID:    cfg.AttemptID,
+			ManifestPath: cfg.ManifestPath,
+			Message:      err.Error(),
+		})
+		return code
 	}
+	writeTerminationSummary(cfg, TerminationSummary{
+		Status:       "succeeded",
+		ExitCode:     ExitSuccess,
+		RunID:        cfg.RunID,
+		NodeID:       cfg.NodeID,
+		AttemptID:    cfg.AttemptID,
+		ManifestPath: cfg.ManifestPath,
+	})
 	return ExitSuccess
 }
 
 func Inspect(cfg Config) int {
 	if err := cfg.Validate(); err != nil {
 		_, _ = fmt.Fprintln(stderrOrDefault(cfg.Stderr), err)
+		writeTerminationSummary(cfg, TerminationSummary{
+			Status:    "invalid_config",
+			ExitCode:  ExitInvalidConfig,
+			RunID:     cfg.RunID,
+			NodeID:    cfg.NodeID,
+			AttemptID: cfg.AttemptID,
+			Message:   err.Error(),
+		})
 		return ExitInvalidConfig
 	}
 	if err := EmitArtifacts(cfg); err != nil {
 		_, _ = fmt.Fprintln(stderrOrDefault(cfg.Stderr), err)
-		return classifyHelperError(err)
+		code := classifyHelperError(err)
+		writeTerminationSummary(cfg, TerminationSummary{
+			Status:       "inspect_failed",
+			ExitCode:     code,
+			RunID:        cfg.RunID,
+			NodeID:       cfg.NodeID,
+			AttemptID:    cfg.AttemptID,
+			ManifestPath: cfg.ManifestPath,
+			Message:      err.Error(),
+		})
+		return code
 	}
+	writeTerminationSummary(cfg, TerminationSummary{
+		Status:       "succeeded",
+		ExitCode:     ExitSuccess,
+		RunID:        cfg.RunID,
+		NodeID:       cfg.NodeID,
+		AttemptID:    cfg.AttemptID,
+		ManifestPath: cfg.ManifestPath,
+	})
 	return ExitSuccess
 }
 
@@ -147,9 +227,6 @@ func EmitArtifacts(cfg Config) error {
 	}
 	if err := atomicWriteFile(cfg.ManifestPath, append(raw, '\n'), 0o600); err != nil {
 		return fmt.Errorf("%w: write manifest: %v", errManifestWriteFailed, err)
-	}
-	if cfg.TerminationLogPath != "" {
-		_ = atomicWriteFile(cfg.TerminationLogPath, raw, 0o600)
 	}
 	return nil
 }
@@ -413,4 +490,15 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func writeTerminationSummary(cfg Config, summary TerminationSummary) {
+	if cfg.TerminationLogPath == "" {
+		return
+	}
+	raw, err := json.Marshal(summary)
+	if err != nil {
+		return
+	}
+	_ = atomicWriteFile(cfg.TerminationLogPath, append(raw, '\n'), 0o600)
 }
