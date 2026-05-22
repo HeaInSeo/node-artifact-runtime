@@ -30,7 +30,7 @@ func TestBuildConfigPrefersContract(t *testing.T) {
 	if err := os.WriteFile(contractPath, []byte(content), 0o600); err != nil {
 		t.Fatalf("write contract: %v", err)
 	}
-	cfg, err := buildConfig(contractPath, "run-from-flag", "", "node-from-flag", "attempt-from-flag", "legacy.txt", "/legacy-out", "/legacy-manifest", "/dev/termination-log")
+	cfg, err := buildConfig(contractPath, "run-from-flag", "", "node-from-flag", "attempt-from-flag", "legacy.txt", "/legacy-work", "/legacy-out", "/legacy-manifest", "/dev/termination-log")
 	if err != nil {
 		t.Fatalf("buildConfig() error = %v", err)
 	}
@@ -42,6 +42,9 @@ func TestBuildConfigPrefersContract(t *testing.T) {
 	}
 	if cfg.ManifestPath != "/out/_meta/jumi/manifest.json" {
 		t.Fatalf("cfg.ManifestPath = %q, want /out/_meta/jumi/manifest.json", cfg.ManifestPath)
+	}
+	if cfg.WorkRoot != "/work" {
+		t.Fatalf("cfg.WorkRoot = %q, want /work", cfg.WorkRoot)
 	}
 	if len(cfg.Outputs) != 1 || cfg.Outputs[0].Path != "report.txt" {
 		t.Fatalf("cfg.Outputs = %#v", cfg.Outputs)

@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -28,6 +30,7 @@ var (
 	errMissingRequiredOutput = errors.New("missing required output")
 	errUnsupportedOutputType = errors.New("unsupported output type")
 	errInspectFailed         = errors.New("inspect failed")
+	errMaterializeFailed     = errors.New("materialize failed")
 	errManifestWriteFailed   = errors.New("manifest write failed")
 )
 
@@ -39,6 +42,7 @@ const (
 	ExitInvalidOutputPath     = 65
 	ExitMissingRequiredOutput = 66
 	ExitUnsupportedOutputType = 67
+	ExitMaterializeFailed     = 69
 	ExitInspectFailed         = 70
 	ExitManifestWriteFailed   = 74
 )
@@ -48,6 +52,21 @@ type OutputSpec struct {
 	Path     string
 	Required bool
 	Type     string
+}
+
+type InputSpec struct {
+	Name                string
+	URI                 string
+	ExpectedDigest      string
+	MaterializationMode string
+	LocalPath           string
+}
+
+type partialInputSpec struct {
+	name                string
+	uri                 string
+	expectedDigest      string
+	materializationMode string
 }
 
 type TerminationSummary struct {
@@ -69,6 +88,8 @@ type Config struct {
 	AttemptID            string
 	ContainerName        string
 	OutputNames          []string
+	Inputs               []InputSpec
+	WorkRoot             string
 	Outputs              []OutputSpec
 	OutputRoot           string
 	ManifestPath         string
@@ -120,6 +141,19 @@ func Run(ctx context.Context, cfg Config) int {
 			Message:   msg,
 		})
 		return ExitInvalidCommand
+	}
+
+	if err := MaterializeInputs(ctx, cfg); err != nil {
+		_, _ = fmt.Fprintln(stderrOrDefault(cfg.Stderr), err)
+		writeTerminationSummary(cfg, TerminationSummary{
+			Status:    "materialization_failed",
+			ExitCode:  ExitMaterializeFailed,
+			RunID:     cfg.RunID,
+			NodeID:    cfg.NodeID,
+			AttemptID: cfg.AttemptID,
+			Message:   err.Error(),
+		})
+		return ExitMaterializeFailed
 	}
 
 	if err := executeCommand(ctx, cfg); err != nil {
@@ -182,6 +216,18 @@ func Inspect(cfg Config) int {
 	}
 	writeTerminationManifest(cfg)
 	return ExitSuccess
+}
+
+func MaterializeInputs(ctx context.Context, cfg Config) error {
+	for _, input := range cfg.Inputs {
+		if strings.TrimSpace(input.MaterializationMode) != "remote_fetch" {
+			continue
+		}
+		if err := materializeRemoteFetchInput(ctx, cfg, input); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func EmitArtifacts(cfg Config) error {
@@ -336,6 +382,7 @@ func executeCommand(ctx context.Context, cfg Config) error {
 	cmd.Stdout = stdoutOrDefault(cfg.Stdout)
 	cmd.Stderr = stderrOrDefault(cfg.Stderr)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Env = cfg.commandEnv()
 
 	if err := cmd.Start(); err != nil {
 		return err
@@ -359,6 +406,128 @@ func executeCommand(ctx context.Context, cfg Config) error {
 	close(stopCh)
 	signal.Stop(sigCh)
 	return err
+}
+
+func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpec) error {
+	if strings.TrimSpace(input.URI) == "" {
+		return fmt.Errorf("%w: input %s has empty uri", errMaterializeFailed, input.Name)
+	}
+	if strings.TrimSpace(input.ExpectedDigest) == "" {
+		return fmt.Errorf("%w: input %s has empty expected digest", errMaterializeFailed, input.Name)
+	}
+	workRoot := effectiveWorkRoot(cfg.WorkRoot)
+	targetPath, err := materializedInputPath(workRoot, input)
+	if err != nil {
+		return fmt.Errorf("%w: input %s target path: %v", errMaterializeFailed, input.Name, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return fmt.Errorf("%w: mkdir target dir for input %s: %v", errMaterializeFailed, input.Name, err)
+	}
+	if err := os.MkdirAll(filepath.Join(workRoot, ".jumi-fetch"), 0o755); err != nil {
+		return fmt.Errorf("%w: mkdir fetch temp dir for input %s: %v", errMaterializeFailed, input.Name, err)
+	}
+	tmpFile, err := os.CreateTemp(filepath.Join(workRoot, ".jumi-fetch"), safeInputName(input.Name)+".*.part")
+	if err != nil {
+		return fmt.Errorf("%w: create temp file for input %s: %v", errMaterializeFailed, input.Name, err)
+	}
+	tmpName := tmpFile.Name()
+	defer os.Remove(tmpName)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, input.URI, nil)
+	if err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("%w: create request for input %s: %v", errMaterializeFailed, input.Name, err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("%w: fetch input %s: %v", errMaterializeFailed, input.Name, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_ = tmpFile.Close()
+		return fmt.Errorf("%w: fetch input %s returned status %d", errMaterializeFailed, input.Name, resp.StatusCode)
+	}
+
+	hash := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmpFile, hash), resp.Body); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("%w: read input %s: %v", errMaterializeFailed, input.Name, err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("%w: sync input %s: %v", errMaterializeFailed, input.Name, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("%w: close input %s temp file: %v", errMaterializeFailed, input.Name, err)
+	}
+
+	actualDigest := "sha256:" + hex.EncodeToString(hash.Sum(nil))
+	if actualDigest != strings.TrimSpace(input.ExpectedDigest) {
+		return fmt.Errorf("%w: input %s digest mismatch: got %s want %s", errMaterializeFailed, input.Name, actualDigest, input.ExpectedDigest)
+	}
+	if err := os.Rename(tmpName, targetPath); err != nil {
+		return fmt.Errorf("%w: move input %s into place: %v", errMaterializeFailed, input.Name, err)
+	}
+	return nil
+}
+
+func materializedInputPath(workRoot string, input InputSpec) (string, error) {
+	workRoot = effectiveWorkRoot(workRoot)
+	if strings.TrimSpace(input.LocalPath) != "" {
+		return secureMaterializedPath(workRoot, input.LocalPath)
+	}
+	return secureMaterializedPath(workRoot, filepath.Join("inputs", strings.ToLower(safeInputName(input.Name))))
+}
+
+func secureMaterializedPath(workRoot, relativePath string) (string, error) {
+	if relativePath == "" {
+		return "", fmt.Errorf("empty materialized path")
+	}
+	if filepath.IsAbs(relativePath) {
+		return "", fmt.Errorf("absolute materialized path is not allowed")
+	}
+	if !filepath.IsLocal(relativePath) {
+		return "", fmt.Errorf("non-local materialized path is not allowed")
+	}
+	candidate := filepath.Clean(filepath.Join(workRoot, relativePath))
+	rel, err := filepath.Rel(workRoot, candidate)
+	if err != nil {
+		return "", err
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("materialized path escapes work root")
+	}
+	return candidate, nil
+}
+
+func safeInputName(name string) string {
+	name = strings.TrimSpace(strings.ToLower(name))
+	if name == "" {
+		return "input"
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "input"
+	}
+	return out
+}
+
+func effectiveWorkRoot(workRoot string) string {
+	return firstNonEmpty(workRoot, "/work")
 }
 
 func forwardSignal(cmd *exec.Cmd, sig os.Signal) {
@@ -413,6 +582,8 @@ func classifyHelperError(err error) int {
 		return ExitMissingRequiredOutput
 	case errors.Is(err, errUnsupportedOutputType):
 		return ExitUnsupportedOutputType
+	case errors.Is(err, errMaterializeFailed):
+		return ExitMaterializeFailed
 	case errors.Is(err, errManifestWriteFailed):
 		return ExitManifestWriteFailed
 	case errors.Is(err, errInspectFailed):
@@ -463,10 +634,75 @@ func ConfigFromContract(c contract.NodeContract) Config {
 		AttemptID:            c.AttemptID,
 		ContainerName:        c.ContainerName,
 		Outputs:              outputs,
+		WorkRoot:             firstNonEmpty(c.Paths.WorkRoot, "/work"),
 		OutputRoot:           c.Paths.OutputRoot,
 		ManifestPath:         c.Paths.ManifestPath,
 		AllowDirectoryOutput: c.Runtime.AllowDirectoryOutput,
 	}
+}
+
+func ParseInputSpecsFromEnv(env []string, workRoot string) []InputSpec {
+	byBase := map[string]*partialInputSpec{}
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || !strings.HasPrefix(key, "JUMI_INPUT_") {
+			continue
+		}
+		switch {
+		case strings.HasSuffix(key, "_URI"):
+			base := strings.TrimSuffix(strings.TrimPrefix(key, "JUMI_INPUT_"), "_URI")
+			p := ensurePartial(byBase, base)
+			p.uri = value
+		case strings.HasSuffix(key, "_EXPECTED_DIGEST"):
+			base := strings.TrimSuffix(strings.TrimPrefix(key, "JUMI_INPUT_"), "_EXPECTED_DIGEST")
+			p := ensurePartial(byBase, base)
+			p.expectedDigest = value
+		case strings.HasSuffix(key, "_MATERIALIZATION_MODE"):
+			base := strings.TrimSuffix(strings.TrimPrefix(key, "JUMI_INPUT_"), "_MATERIALIZATION_MODE")
+			p := ensurePartial(byBase, base)
+			p.materializationMode = value
+		}
+	}
+	bases := make([]string, 0, len(byBase))
+	for base := range byBase {
+		bases = append(bases, base)
+	}
+	sort.Strings(bases)
+	inputs := make([]InputSpec, 0, len(bases))
+	for _, base := range bases {
+		p := byBase[base]
+		if strings.TrimSpace(p.materializationMode) == "" {
+			continue
+		}
+		inputs = append(inputs, InputSpec{
+			Name:                strings.ToLower(base),
+			URI:                 p.uri,
+			ExpectedDigest:      p.expectedDigest,
+			MaterializationMode: p.materializationMode,
+			LocalPath:           filepath.Join("inputs", strings.ToLower(base)),
+		})
+	}
+	return inputs
+}
+
+func ensurePartial(partials map[string]*partialInputSpec, base string) *partialInputSpec {
+	if partials[base] == nil {
+		partials[base] = &partialInputSpec{name: base}
+	}
+	return partials[base]
+}
+
+func (c Config) commandEnv() []string {
+	env := append([]string{}, os.Environ()...)
+	for _, input := range c.Inputs {
+		localPath, err := materializedInputPath(effectiveWorkRoot(c.WorkRoot), input)
+		if err != nil {
+			continue
+		}
+		keyBase := strings.ToUpper(strings.ReplaceAll(safeInputName(input.Name), "-", "_"))
+		env = append(env, "JUMI_INPUT_"+keyBase+"_LOCAL_PATH="+localPath)
+	}
+	return env
 }
 
 func firstNonEmpty(values ...string) string {

@@ -2,7 +2,12 @@ package runtimehelper
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -182,5 +187,87 @@ func TestRunWritesFailureSummaryOnCommandFailure(t *testing.T) {
 	}
 	if summary.ExitCode != 19 {
 		t.Fatalf("termination exitCode = %d, want 19", summary.ExitCode)
+	}
+}
+
+func TestRunMaterializesRemoteFetchInputAndInjectsLocalPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	payload := []byte("remote-input-ok")
+	sum := sha256.Sum256(payload)
+	expectedDigest := "sha256:" + hex.EncodeToString(sum[:])
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	exitCode := Run(context.Background(), Config{
+		RunID:        "run-7",
+		NodeID:       "consume",
+		Inputs:       []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: expectedDigest, MaterializationMode: "remote_fetch"}},
+		WorkRoot:     tmpDir,
+		OutputRoot:   tmpDir,
+		Outputs:      []OutputSpec{{Name: "copied", Path: "copied", Required: true, Type: "file"}},
+		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command: []string{"sh", "-c", fmt.Sprintf(
+			"cat \"$JUMI_INPUT_DATASET_LOCAL_PATH\" > %q",
+			filepath.Join(tmpDir, "copied"),
+		)},
+	})
+	if exitCode != 0 {
+		t.Fatalf("Run() exitCode = %d, want 0", exitCode)
+	}
+	localInputPath := filepath.Join(tmpDir, "inputs", "dataset")
+	raw, err := os.ReadFile(localInputPath)
+	if err != nil {
+		t.Fatalf("read materialized input: %v", err)
+	}
+	if string(raw) != string(payload) {
+		t.Fatalf("materialized input = %q, want %q", string(raw), string(payload))
+	}
+}
+
+func TestRunFailsOnRemoteFetchDigestMismatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("wrong-digest"))
+	}))
+	defer server.Close()
+
+	exitCode := Run(context.Background(), Config{
+		RunID:        "run-8",
+		NodeID:       "consume",
+		Inputs:       []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
+		WorkRoot:     tmpDir,
+		OutputRoot:   tmpDir,
+		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:      []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "inputs", "dataset")); !os.IsNotExist(err) {
+		t.Fatalf("materialized input exists after digest mismatch, stat err = %v", err)
+	}
+}
+
+func TestParseInputSpecsFromEnv(t *testing.T) {
+	inputs := ParseInputSpecsFromEnv([]string{
+		"JUMI_INPUT_DATASET_URI=http://artifact.local/dataset",
+		"JUMI_INPUT_DATASET_EXPECTED_DIGEST=sha256:abc",
+		"JUMI_INPUT_DATASET_MATERIALIZATION_MODE=remote_fetch",
+		"JUMI_INPUT_REFERENCE_URI=http://artifact.local/reference",
+		"JUMI_INPUT_REFERENCE_MATERIALIZATION_MODE=none",
+	}, "/work")
+	if len(inputs) != 2 {
+		t.Fatalf("len(ParseInputSpecsFromEnv()) = %d, want 2", len(inputs))
+	}
+	if inputs[0].Name != "dataset" || inputs[0].LocalPath != filepath.Join("inputs", "dataset") {
+		t.Fatalf("inputs[0] = %#v", inputs[0])
+	}
+	if inputs[0].ExpectedDigest != "sha256:abc" {
+		t.Fatalf("inputs[0].ExpectedDigest = %q, want sha256:abc", inputs[0].ExpectedDigest)
+	}
+	if inputs[1].Name != "reference" || inputs[1].MaterializationMode != "none" {
+		t.Fatalf("inputs[1] = %#v", inputs[1])
 	}
 }

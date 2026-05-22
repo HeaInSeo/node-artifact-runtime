@@ -46,13 +46,14 @@ func runCommand(args []string) int {
 	nodeID := fs.String("node-id", os.Getenv("JUMI_NODE_ID"), "node identifier")
 	attemptID := fs.String("attempt-id", os.Getenv("JUMI_ATTEMPT_ID"), "attempt identifier")
 	outputNames := fs.String("output-names", os.Getenv("JUMI_OUTPUT_NAMES"), "comma-separated output names")
+	workRoot := fs.String("work-root", firstNonEmpty(os.Getenv("JUMI_WORK_ROOT"), "/work"), "work root path")
 	outputRoot := fs.String("output-root", firstNonEmpty(os.Getenv("JUMI_OUTPUT_ROOT"), "/out"), "output root path")
 	manifestPath := fs.String("manifest-path", firstNonEmpty(os.Getenv("JUMI_OUTPUT_MANIFEST_PATH"), provenance.DefaultArtifactsManifestPath), "artifacts manifest path")
 	terminationLogPath := fs.String("termination-log-path", "/dev/termination-log", "termination log path")
 	if err := fs.Parse(args); err != nil {
 		return runtimehelper.ExitInvalidConfig
 	}
-	cfg, err := buildConfig(*contractPath, *runID, *sampleRunID, *nodeID, *attemptID, *outputNames, *outputRoot, *manifestPath, *terminationLogPath)
+	cfg, err := buildConfig(*contractPath, *runID, *sampleRunID, *nodeID, *attemptID, *outputNames, *workRoot, *outputRoot, *manifestPath, *terminationLogPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return runtimehelper.ExitInvalidConfig
@@ -69,13 +70,14 @@ func inspectCommand(args []string) int {
 	nodeID := fs.String("node-id", os.Getenv("JUMI_NODE_ID"), "node identifier")
 	attemptID := fs.String("attempt-id", os.Getenv("JUMI_ATTEMPT_ID"), "attempt identifier")
 	outputNames := fs.String("output-names", os.Getenv("JUMI_OUTPUT_NAMES"), "comma-separated output names")
+	workRoot := fs.String("work-root", firstNonEmpty(os.Getenv("JUMI_WORK_ROOT"), "/work"), "work root path")
 	outputRoot := fs.String("output-root", firstNonEmpty(os.Getenv("JUMI_OUTPUT_ROOT"), "/out"), "output root path")
 	manifestPath := fs.String("manifest-path", firstNonEmpty(os.Getenv("JUMI_OUTPUT_MANIFEST_PATH"), provenance.DefaultArtifactsManifestPath), "artifacts manifest path")
 	terminationLogPath := fs.String("termination-log-path", "/dev/termination-log", "termination log path")
 	if err := fs.Parse(args); err != nil {
 		return runtimehelper.ExitInvalidConfig
 	}
-	cfg, err := buildConfig(*contractPath, *runID, *sampleRunID, *nodeID, *attemptID, *outputNames, *outputRoot, *manifestPath, *terminationLogPath)
+	cfg, err := buildConfig(*contractPath, *runID, *sampleRunID, *nodeID, *attemptID, *outputNames, *workRoot, *outputRoot, *manifestPath, *terminationLogPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return runtimehelper.ExitInvalidConfig
@@ -83,7 +85,7 @@ func inspectCommand(args []string) int {
 	return runtimehelper.Inspect(cfg)
 }
 
-func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputNames, outputRoot, manifestPath, terminationLogPath string) (runtimehelper.Config, error) {
+func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputNames, workRoot, outputRoot, manifestPath, terminationLogPath string) (runtimehelper.Config, error) {
 	if contractPath != "" {
 		c, err := contract.Load(contractPath)
 		if err != nil {
@@ -91,6 +93,7 @@ func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputName
 		}
 		cfg := runtimehelper.ConfigFromContract(c)
 		cfg.TerminationLogPath = terminationLogPath
+		cfg.Inputs = runtimehelper.ParseInputSpecsFromEnv(os.Environ(), cfg.WorkRoot)
 		return cfg, nil
 	}
 	return runtimehelper.Config{
@@ -98,7 +101,9 @@ func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputName
 		SampleRunID:        sampleRunID,
 		NodeID:             nodeID,
 		AttemptID:          attemptID,
+		Inputs:             runtimehelper.ParseInputSpecsFromEnv(os.Environ(), workRoot),
 		OutputNames:        runtimehelper.ParseOutputNames(outputNames),
+		WorkRoot:           workRoot,
 		OutputRoot:         outputRoot,
 		ManifestPath:       manifestPath,
 		TerminationLogPath: terminationLogPath,
