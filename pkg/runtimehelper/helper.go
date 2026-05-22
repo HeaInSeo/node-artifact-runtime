@@ -22,7 +22,7 @@ import (
 	"github.com/HeaInSeo/node-artifact-runtime/pkg/provenance"
 )
 
-const Version = "v0.1.4"
+const Version = "v0.1.5"
 
 var (
 	errInvalidConfig         = errors.New("invalid config")
