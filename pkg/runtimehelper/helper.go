@@ -20,7 +20,7 @@ import (
 	"github.com/HeaInSeo/node-artifact-runtime/pkg/provenance"
 )
 
-const Version = "v0.1.1"
+const Version = "v0.1.2"
 
 var (
 	errInvalidConfig         = errors.New("invalid config")
@@ -486,7 +486,7 @@ func writeTerminationSummary(cfg Config, summary TerminationSummary) {
 	if err != nil {
 		return
 	}
-	_ = atomicWriteFile(cfg.TerminationLogPath, append(raw, '\n'), 0o600)
+	_ = writeTerminationLog(cfg.TerminationLogPath, append(raw, '\n'))
 }
 
 func writeTerminationManifest(cfg Config) {
@@ -503,5 +503,12 @@ func writeTerminationManifest(cfg Config) {
 	if raw[len(raw)-1] != '\n' {
 		raw = append(raw, '\n')
 	}
-	_ = atomicWriteFile(cfg.TerminationLogPath, raw, 0o600)
+	_ = writeTerminationLog(cfg.TerminationLogPath, raw)
+}
+
+func writeTerminationLog(path string, data []byte) error {
+	if path == "" {
+		return nil
+	}
+	return os.WriteFile(path, data, 0o600)
 }
