@@ -20,7 +20,7 @@ import (
 	"github.com/HeaInSeo/node-artifact-runtime/pkg/provenance"
 )
 
-const Version = "v0.1.0"
+const Version = "v0.1.1"
 
 var (
 	errInvalidConfig         = errors.New("invalid config")
@@ -149,14 +149,7 @@ func Run(ctx context.Context, cfg Config) int {
 		})
 		return code
 	}
-	writeTerminationSummary(cfg, TerminationSummary{
-		Status:       "succeeded",
-		ExitCode:     ExitSuccess,
-		RunID:        cfg.RunID,
-		NodeID:       cfg.NodeID,
-		AttemptID:    cfg.AttemptID,
-		ManifestPath: cfg.ManifestPath,
-	})
+	writeTerminationManifest(cfg)
 	return ExitSuccess
 }
 
@@ -187,14 +180,7 @@ func Inspect(cfg Config) int {
 		})
 		return code
 	}
-	writeTerminationSummary(cfg, TerminationSummary{
-		Status:       "succeeded",
-		ExitCode:     ExitSuccess,
-		RunID:        cfg.RunID,
-		NodeID:       cfg.NodeID,
-		AttemptID:    cfg.AttemptID,
-		ManifestPath: cfg.ManifestPath,
-	})
+	writeTerminationManifest(cfg)
 	return ExitSuccess
 }
 
@@ -501,4 +487,21 @@ func writeTerminationSummary(cfg Config, summary TerminationSummary) {
 		return
 	}
 	_ = atomicWriteFile(cfg.TerminationLogPath, append(raw, '\n'), 0o600)
+}
+
+func writeTerminationManifest(cfg Config) {
+	if cfg.TerminationLogPath == "" || cfg.ManifestPath == "" {
+		return
+	}
+	raw, err := os.ReadFile(cfg.ManifestPath)
+	if err != nil {
+		return
+	}
+	if len(raw) == 0 {
+		return
+	}
+	if raw[len(raw)-1] != '\n' {
+		raw = append(raw, '\n')
+	}
+	_ = atomicWriteFile(cfg.TerminationLogPath, raw, 0o600)
 }

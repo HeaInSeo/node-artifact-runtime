@@ -68,15 +68,18 @@ func TestRunWritesManifestAndTerminationLog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read termination log: %v", err)
 	}
-	var summary TerminationSummary
-	if err := json.Unmarshal(terminationRaw, &summary); err != nil {
-		t.Fatalf("unmarshal termination summary: %v", err)
+	var terminationManifest provenance.ArtifactManifest
+	if err := json.Unmarshal(terminationRaw, &terminationManifest); err != nil {
+		t.Fatalf("unmarshal termination manifest: %v", err)
 	}
-	if summary.Status != "succeeded" {
-		t.Fatalf("termination status = %q, want succeeded", summary.Status)
+	if terminationManifest.SchemaVersion != provenance.ArtifactManifestSchemaVersion {
+		t.Fatalf("termination schemaVersion = %q, want %q", terminationManifest.SchemaVersion, provenance.ArtifactManifestSchemaVersion)
 	}
-	if summary.ManifestPath != manifestPath {
-		t.Fatalf("termination manifestPath = %q, want %q", summary.ManifestPath, manifestPath)
+	if terminationManifest.AttemptID != "attempt-1" {
+		t.Fatalf("termination attemptId = %q, want attempt-1", terminationManifest.AttemptID)
+	}
+	if len(terminationManifest.Artifacts) != 1 {
+		t.Fatalf("termination artifact count = %d, want 1", len(terminationManifest.Artifacts))
 	}
 }
 
