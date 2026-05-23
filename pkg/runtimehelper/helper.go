@@ -59,6 +59,7 @@ type InputSpec struct {
 	URI                 string
 	ExpectedDigest      string
 	MaterializationMode string
+	NodeLocalPath       string
 	LocalPath           string
 }
 
@@ -67,6 +68,8 @@ type partialInputSpec struct {
 	uri                 string
 	expectedDigest      string
 	materializationMode string
+	nodeLocalPath       string
+	localPath           string
 }
 
 type TerminationSummary struct {
@@ -220,11 +223,19 @@ func Inspect(cfg Config) int {
 
 func MaterializeInputs(ctx context.Context, cfg Config) error {
 	for _, input := range cfg.Inputs {
-		if strings.TrimSpace(input.MaterializationMode) != "remote_fetch" {
+		switch strings.TrimSpace(input.MaterializationMode) {
+		case "", "none":
 			continue
-		}
-		if err := materializeRemoteFetchInput(ctx, cfg, input); err != nil {
-			return err
+		case "remote_fetch":
+			if err := materializeRemoteFetchInput(ctx, cfg, input); err != nil {
+				return err
+			}
+		case "local_reuse":
+			if err := materializeLocalReuseInput(ctx, cfg, input); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("%w: input %s has unsupported materialization mode %q", errMaterializeFailed, input.Name, input.MaterializationMode)
 		}
 	}
 	return nil
@@ -304,13 +315,15 @@ func buildArtifactRecord(cfg Config, output OutputSpec) (provenance.ArtifactReco
 		uri = fmt.Sprintf("jumi://runs/%s/nodes/%s/attempts/%s/outputs/%s", cfg.RunID, cfg.NodeID, cfg.AttemptID, output.Name)
 	}
 	return provenance.ArtifactRecord{
-		OutputName:   output.Name,
-		DeclaredPath: output.Path,
-		AbsolutePath: path,
-		URI:          uri,
-		Digest:       "sha256:" + hex.EncodeToString(hash.Sum(nil)),
-		SizeBytes:    size,
-		Type:         firstNonEmpty(output.Type, "file"),
+		OutputName:        output.Name,
+		DeclaredPath:      output.Path,
+		AbsolutePath:      path,
+		URI:               uri,
+		LogicalURI:        fmt.Sprintf("jumi://runs/%s/nodes/%s/outputs/%s", cfg.RunID, cfg.NodeID, output.Name),
+		Digest:            "sha256:" + hex.EncodeToString(hash.Sum(nil)),
+		SizeBytes:         size,
+		Type:              firstNonEmpty(output.Type, "file"),
+		ProducerAttemptID: cfg.AttemptID,
 	}, true, nil
 }
 
@@ -453,6 +466,61 @@ func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpe
 	if _, err := io.Copy(io.MultiWriter(tmpFile, hash), resp.Body); err != nil {
 		_ = tmpFile.Close()
 		return fmt.Errorf("%w: read input %s: %v", errMaterializeFailed, input.Name, err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("%w: sync input %s: %v", errMaterializeFailed, input.Name, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("%w: close input %s temp file: %v", errMaterializeFailed, input.Name, err)
+	}
+
+	actualDigest := "sha256:" + hex.EncodeToString(hash.Sum(nil))
+	if actualDigest != strings.TrimSpace(input.ExpectedDigest) {
+		return fmt.Errorf("%w: input %s digest mismatch: got %s want %s", errMaterializeFailed, input.Name, actualDigest, input.ExpectedDigest)
+	}
+	if err := os.Rename(tmpName, targetPath); err != nil {
+		return fmt.Errorf("%w: move input %s into place: %v", errMaterializeFailed, input.Name, err)
+	}
+	return nil
+}
+
+func materializeLocalReuseInput(_ context.Context, cfg Config, input InputSpec) error {
+	if strings.TrimSpace(input.NodeLocalPath) == "" {
+		return fmt.Errorf("%w: input %s has empty node-local path", errMaterializeFailed, input.Name)
+	}
+	if strings.TrimSpace(input.ExpectedDigest) == "" {
+		return fmt.Errorf("%w: input %s has empty expected digest", errMaterializeFailed, input.Name)
+	}
+	workRoot := effectiveWorkRoot(cfg.WorkRoot)
+	targetPath, err := materializedInputPath(workRoot, input)
+	if err != nil {
+		return fmt.Errorf("%w: input %s target path: %v", errMaterializeFailed, input.Name, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return fmt.Errorf("%w: mkdir target dir for input %s: %v", errMaterializeFailed, input.Name, err)
+	}
+	if err := os.MkdirAll(filepath.Join(workRoot, ".jumi-fetch"), 0o755); err != nil {
+		return fmt.Errorf("%w: mkdir materialize temp dir for input %s: %v", errMaterializeFailed, input.Name, err)
+	}
+	tmpFile, err := os.CreateTemp(filepath.Join(workRoot, ".jumi-fetch"), safeInputName(input.Name)+".*.part")
+	if err != nil {
+		return fmt.Errorf("%w: create temp file for input %s: %v", errMaterializeFailed, input.Name, err)
+	}
+	tmpName := tmpFile.Name()
+	defer os.Remove(tmpName)
+
+	sourceFile, err := os.Open(input.NodeLocalPath)
+	if err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("%w: open node-local input %s: %v", errMaterializeFailed, input.Name, err)
+	}
+	defer sourceFile.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmpFile, hash), sourceFile); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("%w: copy node-local input %s: %v", errMaterializeFailed, input.Name, err)
 	}
 	if err := tmpFile.Sync(); err != nil {
 		_ = tmpFile.Close()
@@ -661,6 +729,14 @@ func ParseInputSpecsFromEnv(env []string, workRoot string) []InputSpec {
 			base := strings.TrimSuffix(strings.TrimPrefix(key, "JUMI_INPUT_"), "_MATERIALIZATION_MODE")
 			p := ensurePartial(byBase, base)
 			p.materializationMode = value
+		case strings.HasSuffix(key, "_NODE_LOCAL_PATH"):
+			base := strings.TrimSuffix(strings.TrimPrefix(key, "JUMI_INPUT_"), "_NODE_LOCAL_PATH")
+			p := ensurePartial(byBase, base)
+			p.nodeLocalPath = value
+		case strings.HasSuffix(key, "_LOCAL_PATH"):
+			base := strings.TrimSuffix(strings.TrimPrefix(key, "JUMI_INPUT_"), "_LOCAL_PATH")
+			p := ensurePartial(byBase, base)
+			p.localPath = value
 		}
 	}
 	bases := make([]string, 0, len(byBase))
@@ -679,7 +755,8 @@ func ParseInputSpecsFromEnv(env []string, workRoot string) []InputSpec {
 			URI:                 p.uri,
 			ExpectedDigest:      p.expectedDigest,
 			MaterializationMode: p.materializationMode,
-			LocalPath:           filepath.Join("inputs", strings.ToLower(base)),
+			NodeLocalPath:       p.nodeLocalPath,
+			LocalPath:           firstNonEmpty(p.localPath, filepath.Join("inputs", strings.ToLower(base))),
 		})
 	}
 	return inputs
