@@ -67,6 +67,12 @@ func TestRunWritesManifestAndTerminationLog(t *testing.T) {
 	if record.Digest == "" {
 		t.Fatal("digest = empty, want sha256")
 	}
+	if record.LogicalURI != "jumi://runs/run-1/nodes/produce/outputs/report" {
+		t.Fatalf("logicalUri = %q, want attemptless logical URI", record.LogicalURI)
+	}
+	if record.ProducerAttemptID != "attempt-1" {
+		t.Fatalf("producerAttemptId = %q, want attempt-1", record.ProducerAttemptID)
+	}
 
 	// #nosec G304 -- terminationPath is created under t.TempDir for this test.
 	terminationRaw, err := os.ReadFile(terminationPath)
@@ -85,6 +91,59 @@ func TestRunWritesManifestAndTerminationLog(t *testing.T) {
 	}
 	if len(terminationManifest.Artifacts) != 1 {
 		t.Fatalf("termination artifact count = %d, want 1", len(terminationManifest.Artifacts))
+	}
+}
+
+func TestRunPromotesOutputToNodeLocalCASAndRecordsLocation(t *testing.T) {
+	tmpDir := t.TempDir()
+	nodeLocalRoot := filepath.Join(tmpDir, "var", "lib", "jumi-artifacts")
+	manifestPath := filepath.Join(tmpDir, "_meta", "artifacts.manifest.json")
+
+	exitCode := Run(context.Background(), Config{
+		RunID:                 "run-promote",
+		SampleRunID:           "sample-promote",
+		NodeID:                "worker-2",
+		AttemptID:             "attempt-7",
+		ContainerName:         "main",
+		NodeLocalArtifactRoot: nodeLocalRoot,
+		Outputs:               []OutputSpec{{Name: "result", Path: "result.bam", Required: true, Type: "file"}},
+		OutputRoot:            tmpDir,
+		ManifestPath:          manifestPath,
+		TerminationLogPath:    filepath.Join(tmpDir, "termination.log"),
+		Command:               []string{"sh", "-c", "printf genome > " + filepath.Join(tmpDir, "result.bam")},
+	})
+	if exitCode != 0 {
+		t.Fatalf("Run() exitCode = %d, want 0", exitCode)
+	}
+
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var manifest provenance.ArtifactManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+	if len(manifest.Artifacts) != 1 {
+		t.Fatalf("artifact count = %d, want 1", len(manifest.Artifacts))
+	}
+	record := manifest.Artifacts[0]
+	if len(record.Locations) != 1 || record.Locations[0].NodeLocal == nil {
+		t.Fatalf("locations = %#v, want one nodeLocal location", record.Locations)
+	}
+	nodeLocalPath := record.Locations[0].NodeLocal.Path
+	if wantPrefix := filepath.Join(nodeLocalRoot, "cas", "sha256"); filepath.Dir(nodeLocalPath) != wantPrefix {
+		t.Fatalf("nodeLocalPath dir = %q, want %q", filepath.Dir(nodeLocalPath), wantPrefix)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "result.bam")); err != nil {
+		t.Fatalf("original output missing after promotion: %v", err)
+	}
+	promoted, err := os.ReadFile(nodeLocalPath)
+	if err != nil {
+		t.Fatalf("read promoted CAS artifact: %v", err)
+	}
+	if string(promoted) != "genome" {
+		t.Fatalf("promoted content = %q, want genome", string(promoted))
 	}
 }
 

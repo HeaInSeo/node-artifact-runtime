@@ -86,6 +86,7 @@ func inspectCommand(args []string) int {
 }
 
 func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputNames, workRoot, outputRoot, manifestPath, terminationLogPath string) (runtimehelper.Config, error) {
+	nodeLocalArtifactRoot := os.Getenv("JUMI_NODE_LOCAL_ARTIFACT_ROOT")
 	if contractPath != "" {
 		c, err := contract.Load(contractPath)
 		if err != nil {
@@ -93,19 +94,21 @@ func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputName
 		}
 		cfg := runtimehelper.ConfigFromContract(c)
 		cfg.TerminationLogPath = terminationLogPath
+		cfg.NodeLocalArtifactRoot = nodeLocalArtifactRoot
 		cfg.Inputs = runtimehelper.ParseInputSpecsFromEnv(os.Environ(), cfg.WorkRoot)
 		return cfg, nil
 	}
 	return runtimehelper.Config{
-		RunID:              runID,
-		SampleRunID:        sampleRunID,
-		NodeID:             nodeID,
-		AttemptID:          attemptID,
-		Inputs:             runtimehelper.ParseInputSpecsFromEnv(os.Environ(), workRoot),
-		OutputNames:        runtimehelper.ParseOutputNames(outputNames),
-		WorkRoot:           workRoot,
-		OutputRoot:         outputRoot,
-		ManifestPath:       manifestPath,
-		TerminationLogPath: terminationLogPath,
+		RunID:                 runID,
+		SampleRunID:           sampleRunID,
+		NodeID:                nodeID,
+		AttemptID:             attemptID,
+		Inputs:                runtimehelper.ParseInputSpecsFromEnv(os.Environ(), workRoot),
+		OutputNames:           runtimehelper.ParseOutputNames(outputNames),
+		WorkRoot:              workRoot,
+		NodeLocalArtifactRoot: nodeLocalArtifactRoot,
+		OutputRoot:            outputRoot,
+		ManifestPath:          manifestPath,
+		TerminationLogPath:    terminationLogPath,
 	}, nil
 }

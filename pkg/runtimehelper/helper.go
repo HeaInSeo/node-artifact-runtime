@@ -85,22 +85,23 @@ type TerminationSummary struct {
 // Config describes the runtime-side artifact helper contract executed inside
 // the DAG node runtime container after wrapping the user command.
 type Config struct {
-	RunID                string
-	SampleRunID          string
-	NodeID               string
-	AttemptID            string
-	ContainerName        string
-	OutputNames          []string
-	Inputs               []InputSpec
-	WorkRoot             string
-	Outputs              []OutputSpec
-	OutputRoot           string
-	ManifestPath         string
-	TerminationLogPath   string
-	AllowDirectoryOutput bool
-	Command              []string
-	Stdout               io.Writer
-	Stderr               io.Writer
+	RunID                 string
+	SampleRunID           string
+	NodeID                string
+	AttemptID             string
+	ContainerName         string
+	OutputNames           []string
+	Inputs                []InputSpec
+	WorkRoot              string
+	NodeLocalArtifactRoot string
+	Outputs               []OutputSpec
+	OutputRoot            string
+	ManifestPath          string
+	TerminationLogPath    string
+	AllowDirectoryOutput  bool
+	Command               []string
+	Stdout                io.Writer
+	Stderr                io.Writer
 }
 
 func (c Config) Validate() error {
@@ -314,7 +315,7 @@ func buildArtifactRecord(cfg Config, output OutputSpec) (provenance.ArtifactReco
 	if cfg.AttemptID != "" {
 		uri = fmt.Sprintf("jumi://runs/%s/nodes/%s/attempts/%s/outputs/%s", cfg.RunID, cfg.NodeID, cfg.AttemptID, output.Name)
 	}
-	return provenance.ArtifactRecord{
+	record := provenance.ArtifactRecord{
 		OutputName:        output.Name,
 		DeclaredPath:      output.Path,
 		AbsolutePath:      path,
@@ -324,7 +325,15 @@ func buildArtifactRecord(cfg Config, output OutputSpec) (provenance.ArtifactReco
 		SizeBytes:         size,
 		Type:              firstNonEmpty(output.Type, "file"),
 		ProducerAttemptID: cfg.AttemptID,
-	}, true, nil
+	}
+	if strings.TrimSpace(cfg.NodeLocalArtifactRoot) != "" {
+		location, err := promoteOutputToNodeLocalCAS(cfg, output, path, record.Digest)
+		if err != nil {
+			return provenance.ArtifactRecord{}, false, err
+		}
+		record.Locations = []provenance.ArtifactLocation{{NodeLocal: location}}
+	}
+	return record, true, nil
 }
 
 func secureOutputPath(outputRoot, declaredPath string) (string, error) {
@@ -659,6 +668,107 @@ func classifyHelperError(err error) int {
 	default:
 		return ExitGenericError
 	}
+}
+
+func promoteOutputToNodeLocalCAS(cfg Config, output OutputSpec, sourcePath, digest string) (*provenance.NodeLocalLocation, error) {
+	root := filepath.Clean(cfg.NodeLocalArtifactRoot)
+	hexDigest := strings.TrimPrefix(digest, "sha256:")
+	if hexDigest == "" || hexDigest == digest {
+		return nil, fmt.Errorf("%w: output %s has unsupported digest %q", errInspectFailed, output.Name, digest)
+	}
+	casDir := filepath.Join(root, "cas", "sha256")
+	tmpDir := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(casDir, 0o755); err != nil {
+		return nil, fmt.Errorf("%w: mkdir CAS dir for output %s: %v", errInspectFailed, output.Name, err)
+	}
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return nil, fmt.Errorf("%w: mkdir tmp dir for output %s: %v", errInspectFailed, output.Name, err)
+	}
+	finalPath := filepath.Join(casDir, hexDigest)
+	if ok, err := verifyExistingCASArtifact(finalPath, digest); err != nil {
+		return nil, err
+	} else if ok {
+		return &provenance.NodeLocalLocation{Path: finalPath}, nil
+	}
+	tmpFile, err := os.CreateTemp(tmpDir, fmt.Sprintf("%s-%s-%s-%s-", cfg.RunID, cfg.NodeID, cfg.AttemptID, output.Name))
+	if err != nil {
+		return nil, fmt.Errorf("%w: create temp CAS file for output %s: %v", errInspectFailed, output.Name, err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+	_ = tmpFile.Close()
+	if err := copyFile(sourcePath, tmpPath); err != nil {
+		return nil, fmt.Errorf("%w: copy output %s to temp CAS: %v", errInspectFailed, output.Name, err)
+	}
+	if actual, err := sha256Digest(tmpPath); err != nil {
+		return nil, fmt.Errorf("%w: hash promoted output %s: %v", errInspectFailed, output.Name, err)
+	} else if actual != digest {
+		return nil, fmt.Errorf("%w: promoted output %s digest mismatch: got %s want %s", errInspectFailed, output.Name, actual, digest)
+	}
+	if ok, err := verifyExistingCASArtifact(finalPath, digest); err != nil {
+		return nil, err
+	} else if ok {
+		return &provenance.NodeLocalLocation{Path: finalPath}, nil
+	}
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		return nil, fmt.Errorf("%w: move promoted output %s into CAS: %v", errInspectFailed, output.Name, err)
+	}
+	return &provenance.NodeLocalLocation{Path: finalPath}, nil
+}
+
+func verifyExistingCASArtifact(path, expectedDigest string) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%w: stat existing CAS artifact: %v", errInspectFailed, err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("%w: existing CAS artifact is not a regular file", errInspectFailed)
+	}
+	actual, err := sha256Digest(path)
+	if err != nil {
+		return false, fmt.Errorf("%w: hash existing CAS artifact: %v", errInspectFailed, err)
+	}
+	if actual != expectedDigest {
+		return false, fmt.Errorf("%w: existing CAS artifact digest mismatch: got %s want %s", errInspectFailed, actual, expectedDigest)
+	}
+	return true, nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+func sha256Digest(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, f); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func (c Config) effectiveOutputs() []OutputSpec {
