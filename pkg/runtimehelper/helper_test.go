@@ -324,13 +324,14 @@ func TestRunMaterializesLocalReuseInputAndInjectsLocalPath(t *testing.T) {
 	expectedDigest := "sha256:" + hex.EncodeToString(sum[:])
 
 	exitCode := Run(context.Background(), Config{
-		RunID:        "run-9",
-		NodeID:       "consume",
-		Inputs:       []InputSpec{{Name: "dataset", NodeLocalPath: sourcePath, ExpectedDigest: expectedDigest, MaterializationMode: "local_reuse", LocalPath: filepath.Join("inputs", "result")}},
-		WorkRoot:     tmpDir,
-		OutputRoot:   tmpDir,
-		Outputs:      []OutputSpec{{Name: "copied", Path: "copied", Required: true, Type: "file"}},
-		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		RunID:                 "run-9",
+		NodeID:                "consume",
+		Inputs:                []InputSpec{{Name: "dataset", NodeLocalPath: sourcePath, ExpectedDigest: expectedDigest, MaterializationMode: "local_reuse", LocalPath: filepath.Join("inputs", "result")}},
+		WorkRoot:              tmpDir,
+		NodeLocalArtifactRoot: nodeLocalDir,
+		OutputRoot:            tmpDir,
+		Outputs:               []OutputSpec{{Name: "copied", Path: "copied", Required: true, Type: "file"}},
+		ManifestPath:          filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
 		Command: []string{"sh", "-c", fmt.Sprintf(
 			"cat \"$JUMI_INPUT_DATASET_LOCAL_PATH\" > %q",
 			filepath.Join(tmpDir, "copied"),
@@ -361,19 +362,71 @@ func TestRunFailsOnLocalReuseDigestMismatch(t *testing.T) {
 	}
 
 	exitCode := Run(context.Background(), Config{
-		RunID:        "run-10",
-		NodeID:       "consume",
-		Inputs:       []InputSpec{{Name: "dataset", NodeLocalPath: sourcePath, ExpectedDigest: "sha256:deadbeef", MaterializationMode: "local_reuse"}},
-		WorkRoot:     tmpDir,
-		OutputRoot:   tmpDir,
-		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
-		Command:      []string{"sh", "-c", "exit 0"},
+		RunID:                 "run-10",
+		NodeID:                "consume",
+		Inputs:                []InputSpec{{Name: "dataset", NodeLocalPath: sourcePath, ExpectedDigest: "sha256:deadbeef", MaterializationMode: "local_reuse"}},
+		WorkRoot:              tmpDir,
+		NodeLocalArtifactRoot: nodeLocalDir,
+		OutputRoot:            tmpDir,
+		ManifestPath:          filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:               []string{"sh", "-c", "exit 0"},
 	})
 	if exitCode != ExitMaterializeFailed {
 		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
 	}
 	if _, err := os.Stat(filepath.Join(tmpDir, "inputs", "dataset")); !os.IsNotExist(err) {
 		t.Fatalf("materialized input exists after digest mismatch, stat err = %v", err)
+	}
+}
+
+func TestRunFailsOnLocalReusePathOutsideAllowedRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+	nodeLocalDir := filepath.Join(tmpDir, "node-local")
+	if err := os.MkdirAll(nodeLocalDir, 0o755); err != nil {
+		t.Fatalf("mkdir node-local dir: %v", err)
+	}
+	sourcePath := filepath.Join(tmpDir, "outside.bin")
+	payload := []byte("outside-root")
+	if err := os.WriteFile(sourcePath, payload, 0o644); err != nil {
+		t.Fatalf("write source artifact: %v", err)
+	}
+	sum := sha256.Sum256(payload)
+	expectedDigest := "sha256:" + hex.EncodeToString(sum[:])
+
+	exitCode := Run(context.Background(), Config{
+		RunID:                 "run-11",
+		NodeID:                "consume",
+		Inputs:                []InputSpec{{Name: "dataset", NodeLocalPath: sourcePath, ExpectedDigest: expectedDigest, MaterializationMode: "local_reuse"}},
+		WorkRoot:              tmpDir,
+		NodeLocalArtifactRoot: nodeLocalDir,
+		OutputRoot:            tmpDir,
+		ManifestPath:          filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:               []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
+	}
+}
+
+func TestRunFailsOnLocalReuseRelativePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	nodeLocalDir := filepath.Join(tmpDir, "node-local")
+	if err := os.MkdirAll(nodeLocalDir, 0o755); err != nil {
+		t.Fatalf("mkdir node-local dir: %v", err)
+	}
+
+	exitCode := Run(context.Background(), Config{
+		RunID:                 "run-12",
+		NodeID:                "consume",
+		Inputs:                []InputSpec{{Name: "dataset", NodeLocalPath: "artifact.bin", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "local_reuse"}},
+		WorkRoot:              tmpDir,
+		NodeLocalArtifactRoot: nodeLocalDir,
+		OutputRoot:            tmpDir,
+		ManifestPath:          filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:               []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
 	}
 }
 

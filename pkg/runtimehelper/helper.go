@@ -501,6 +501,9 @@ func materializeLocalReuseInput(_ context.Context, cfg Config, input InputSpec) 
 	if strings.TrimSpace(input.ExpectedDigest) == "" {
 		return fmt.Errorf("%w: input %s has empty expected digest", errMaterializeFailed, input.Name)
 	}
+	if err := validateNodeLocalSourcePath(cfg, input.NodeLocalPath); err != nil {
+		return fmt.Errorf("%w: input %s: %v", errMaterializeFailed, input.Name, err)
+	}
 	workRoot := effectiveWorkRoot(cfg.WorkRoot)
 	targetPath, err := materializedInputPath(workRoot, input)
 	if err != nil {
@@ -545,6 +548,26 @@ func materializeLocalReuseInput(_ context.Context, cfg Config, input InputSpec) 
 	}
 	if err := os.Rename(tmpName, targetPath); err != nil {
 		return fmt.Errorf("%w: move input %s into place: %v", errMaterializeFailed, input.Name, err)
+	}
+	return nil
+}
+
+func validateNodeLocalSourcePath(cfg Config, sourcePath string) error {
+	if !filepath.IsAbs(sourcePath) {
+		return fmt.Errorf("node-local source path must be absolute: %q", sourcePath)
+	}
+	root := strings.TrimSpace(cfg.NodeLocalArtifactRoot)
+	if root == "" {
+		return fmt.Errorf("node-local artifact root is required for local_reuse")
+	}
+	cleanedRoot := filepath.Clean(root)
+	cleanedPath := filepath.Clean(sourcePath)
+	rel, err := filepath.Rel(cleanedRoot, cleanedPath)
+	if err != nil {
+		return err
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("node-local source path %q is outside allowed root %q", sourcePath, cleanedRoot)
 	}
 	return nil
 }
