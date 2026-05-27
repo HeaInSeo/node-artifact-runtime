@@ -145,6 +145,74 @@ func TestRunPromotesOutputToNodeLocalCASAndRecordsLocation(t *testing.T) {
 	if string(promoted) != "genome" {
 		t.Fatalf("promoted content = %q, want genome", string(promoted))
 	}
+	sum := sha256.Sum256(promoted)
+	if got, want := record.Digest, "sha256:"+hex.EncodeToString(sum[:]); got != want {
+		t.Fatalf("record digest = %q, want %q", got, want)
+	}
+	if got, want := record.SizeBytes, int64(len(promoted)); got != want {
+		t.Fatalf("record sizeBytes = %d, want %d", got, want)
+	}
+}
+
+func TestRunPromotesOutputToExistingCASArtifactAndReusesLocation(t *testing.T) {
+	tmpDir := t.TempDir()
+	nodeLocalRoot := filepath.Join(tmpDir, "var", "lib", "jumi-artifacts")
+	manifestPath := filepath.Join(tmpDir, "_meta", "artifacts.manifest.json")
+	payload := []byte("genome")
+	sum := sha256.Sum256(payload)
+	hexDigest := hex.EncodeToString(sum[:])
+	casDir := filepath.Join(nodeLocalRoot, "cas", "sha256")
+	if err := os.MkdirAll(casDir, 0o755); err != nil {
+		t.Fatalf("mkdir cas dir: %v", err)
+	}
+	existingPath := filepath.Join(casDir, hexDigest)
+	if err := os.WriteFile(existingPath, payload, 0o644); err != nil {
+		t.Fatalf("write existing CAS artifact: %v", err)
+	}
+	infoBefore, err := os.Stat(existingPath)
+	if err != nil {
+		t.Fatalf("stat existing CAS artifact: %v", err)
+	}
+
+	exitCode := Run(context.Background(), Config{
+		RunID:                 "run-promote-existing",
+		SampleRunID:           "sample-promote-existing",
+		NodeID:                "worker-2",
+		AttemptID:             "attempt-8",
+		ContainerName:         "main",
+		NodeLocalArtifactRoot: nodeLocalRoot,
+		Outputs:               []OutputSpec{{Name: "result", Path: "result.bam", Required: true, Type: "file"}},
+		OutputRoot:            tmpDir,
+		ManifestPath:          manifestPath,
+		TerminationLogPath:    filepath.Join(tmpDir, "termination.log"),
+		Command:               []string{"sh", "-c", "printf genome > " + filepath.Join(tmpDir, "result.bam")},
+	})
+	if exitCode != 0 {
+		t.Fatalf("Run() exitCode = %d, want 0", exitCode)
+	}
+
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var manifest provenance.ArtifactManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+	record := manifest.Artifacts[0]
+	if len(record.Locations) != 1 || record.Locations[0].NodeLocal == nil {
+		t.Fatalf("locations = %#v, want one nodeLocal location", record.Locations)
+	}
+	if got := record.Locations[0].NodeLocal.Path; got != existingPath {
+		t.Fatalf("nodeLocalPath = %q, want %q", got, existingPath)
+	}
+	infoAfter, err := os.Stat(existingPath)
+	if err != nil {
+		t.Fatalf("stat existing CAS artifact after run: %v", err)
+	}
+	if !infoAfter.ModTime().Equal(infoBefore.ModTime()) {
+		t.Fatalf("existing CAS artifact was replaced; modTime before=%s after=%s", infoBefore.ModTime(), infoAfter.ModTime())
+	}
 }
 
 func TestRunPropagatesChildExitCode(t *testing.T) {

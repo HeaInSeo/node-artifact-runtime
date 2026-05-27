@@ -296,41 +296,51 @@ func buildArtifactRecord(cfg Config, output OutputSpec) (provenance.ArtifactReco
 		}
 		return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: output %s is not a regular file", errUnsupportedOutputType, output.Name)
 	}
-	// #nosec G304 -- path is normalized and must resolve under the container output root.
-	f, err := os.Open(path)
-	if err != nil {
-		return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: open output %s: %v", errInspectFailed, output.Name, err)
-	}
-	defer func() {
-		_ = f.Close()
-	}()
-
-	hash := sha256.New()
-	size, err := io.Copy(hash, f)
-	if err != nil {
-		return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: hash output %s: %v", errInspectFailed, output.Name, err)
-	}
-
 	uri := fmt.Sprintf("jumi://runs/%s/nodes/%s/outputs/%s", cfg.RunID, cfg.NodeID, output.Name)
 	if cfg.AttemptID != "" {
 		uri = fmt.Sprintf("jumi://runs/%s/nodes/%s/attempts/%s/outputs/%s", cfg.RunID, cfg.NodeID, cfg.AttemptID, output.Name)
 	}
+	logicalURI := fmt.Sprintf("jumi://runs/%s/nodes/%s/outputs/%s", cfg.RunID, cfg.NodeID, output.Name)
+
+	var (
+		digest   string
+		size     int64
+		location *provenance.NodeLocalLocation
+	)
+	if strings.TrimSpace(cfg.NodeLocalArtifactRoot) != "" {
+		location, digest, size, err = promoteOutputToNodeLocalCAS(cfg, output, path)
+		if err != nil {
+			return provenance.ArtifactRecord{}, false, err
+		}
+	} else {
+		// #nosec G304 -- path is normalized and must resolve under the container output root.
+		f, err := os.Open(path)
+		if err != nil {
+			return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: open output %s: %v", errInspectFailed, output.Name, err)
+		}
+		defer func() {
+			_ = f.Close()
+		}()
+		hash := sha256.New()
+		size, err = io.Copy(hash, f)
+		if err != nil {
+			return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: hash output %s: %v", errInspectFailed, output.Name, err)
+		}
+		digest = "sha256:" + hex.EncodeToString(hash.Sum(nil))
+	}
+
 	record := provenance.ArtifactRecord{
 		OutputName:        output.Name,
 		DeclaredPath:      output.Path,
 		AbsolutePath:      path,
 		URI:               uri,
-		LogicalURI:        fmt.Sprintf("jumi://runs/%s/nodes/%s/outputs/%s", cfg.RunID, cfg.NodeID, output.Name),
-		Digest:            "sha256:" + hex.EncodeToString(hash.Sum(nil)),
+		LogicalURI:        logicalURI,
+		Digest:            digest,
 		SizeBytes:         size,
 		Type:              firstNonEmpty(output.Type, "file"),
 		ProducerAttemptID: cfg.AttemptID,
 	}
-	if strings.TrimSpace(cfg.NodeLocalArtifactRoot) != "" {
-		location, err := promoteOutputToNodeLocalCAS(cfg, output, path, record.Digest)
-		if err != nil {
-			return provenance.ArtifactRecord{}, false, err
-		}
+	if location != nil {
 		record.Locations = []provenance.ArtifactLocation{{NodeLocal: location}}
 	}
 	return record, true, nil
@@ -693,50 +703,66 @@ func classifyHelperError(err error) int {
 	}
 }
 
-func promoteOutputToNodeLocalCAS(cfg Config, output OutputSpec, sourcePath, digest string) (*provenance.NodeLocalLocation, error) {
+func promoteOutputToNodeLocalCAS(cfg Config, output OutputSpec, sourcePath string) (*provenance.NodeLocalLocation, string, int64, error) {
 	root := filepath.Clean(cfg.NodeLocalArtifactRoot)
-	hexDigest := strings.TrimPrefix(digest, "sha256:")
-	if hexDigest == "" || hexDigest == digest {
-		return nil, fmt.Errorf("%w: output %s has unsupported digest %q", errInspectFailed, output.Name, digest)
-	}
 	casDir := filepath.Join(root, "cas", "sha256")
 	tmpDir := filepath.Join(root, "tmp")
 	if err := os.MkdirAll(casDir, 0o755); err != nil {
-		return nil, fmt.Errorf("%w: mkdir CAS dir for output %s: %v", errInspectFailed, output.Name, err)
+		return nil, "", 0, fmt.Errorf("%w: mkdir CAS dir for output %s: %v", errInspectFailed, output.Name, err)
 	}
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
-		return nil, fmt.Errorf("%w: mkdir tmp dir for output %s: %v", errInspectFailed, output.Name, err)
-	}
-	finalPath := filepath.Join(casDir, hexDigest)
-	if ok, err := verifyExistingCASArtifact(finalPath, digest); err != nil {
-		return nil, err
-	} else if ok {
-		return &provenance.NodeLocalLocation{Path: finalPath}, nil
+		return nil, "", 0, fmt.Errorf("%w: mkdir tmp dir for output %s: %v", errInspectFailed, output.Name, err)
 	}
 	tmpFile, err := os.CreateTemp(tmpDir, fmt.Sprintf("%s-%s-%s-%s-", cfg.RunID, cfg.NodeID, cfg.AttemptID, output.Name))
 	if err != nil {
-		return nil, fmt.Errorf("%w: create temp CAS file for output %s: %v", errInspectFailed, output.Name, err)
+		return nil, "", 0, fmt.Errorf("%w: create temp CAS file for output %s: %v", errInspectFailed, output.Name, err)
 	}
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
-	_ = tmpFile.Close()
-	if err := copyFile(sourcePath, tmpPath); err != nil {
-		return nil, fmt.Errorf("%w: copy output %s to temp CAS: %v", errInspectFailed, output.Name, err)
+
+	sourceFile, err := os.Open(sourcePath)
+	if err != nil {
+		_ = tmpFile.Close()
+		return nil, "", 0, fmt.Errorf("%w: open output %s for CAS promotion: %v", errInspectFailed, output.Name, err)
 	}
-	if actual, err := sha256Digest(tmpPath); err != nil {
-		return nil, fmt.Errorf("%w: hash promoted output %s: %v", errInspectFailed, output.Name, err)
-	} else if actual != digest {
-		return nil, fmt.Errorf("%w: promoted output %s digest mismatch: got %s want %s", errInspectFailed, output.Name, actual, digest)
+	defer func() {
+		_ = sourceFile.Close()
+	}()
+
+	hash := sha256.New()
+	size, err := io.Copy(io.MultiWriter(tmpFile, hash), sourceFile)
+	if err != nil {
+		_ = tmpFile.Close()
+		return nil, "", 0, fmt.Errorf("%w: copy output %s to temp CAS: %v", errInspectFailed, output.Name, err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		return nil, "", 0, fmt.Errorf("%w: sync temp CAS file for output %s: %v", errInspectFailed, output.Name, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return nil, "", 0, fmt.Errorf("%w: close temp CAS file for output %s: %v", errInspectFailed, output.Name, err)
+	}
+
+	digest := "sha256:" + hex.EncodeToString(hash.Sum(nil))
+	hexDigest := strings.TrimPrefix(digest, "sha256:")
+	if hexDigest == "" || hexDigest == digest {
+		return nil, "", 0, fmt.Errorf("%w: output %s has unsupported digest %q", errInspectFailed, output.Name, digest)
+	}
+	finalPath := filepath.Join(casDir, hexDigest)
+	if ok, err := verifyExistingCASArtifact(finalPath, digest); err != nil {
+		return nil, "", 0, err
+	} else if ok {
+		return &provenance.NodeLocalLocation{Path: finalPath}, digest, size, nil
 	}
 	if ok, err := verifyExistingCASArtifact(finalPath, digest); err != nil {
-		return nil, err
+		return nil, "", 0, err
 	} else if ok {
-		return &provenance.NodeLocalLocation{Path: finalPath}, nil
+		return &provenance.NodeLocalLocation{Path: finalPath}, digest, size, nil
 	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
-		return nil, fmt.Errorf("%w: move promoted output %s into CAS: %v", errInspectFailed, output.Name, err)
+		return nil, "", 0, fmt.Errorf("%w: move promoted output %s into CAS: %v", errInspectFailed, output.Name, err)
 	}
-	return &provenance.NodeLocalLocation{Path: finalPath}, nil
+	return &provenance.NodeLocalLocation{Path: finalPath}, digest, size, nil
 }
 
 func verifyExistingCASArtifact(path, expectedDigest string) (bool, error) {
