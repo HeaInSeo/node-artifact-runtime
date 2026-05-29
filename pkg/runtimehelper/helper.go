@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -125,6 +126,11 @@ func (c Config) Validate() error {
 	}
 	if c.ManifestPath == "" {
 		return fmt.Errorf("%w: manifestPath is required", errInvalidConfig)
+	}
+	for _, input := range c.Inputs {
+		if input.ExpectedSizeBytes < 0 {
+			return fmt.Errorf("%w: input %s expected size must be >= 0", errInvalidConfig, input.Name)
+		}
 	}
 	return nil
 }
@@ -662,8 +668,13 @@ func validateRemoteFetchURI(cfg Config, rawURI string) error {
 	if host == "" {
 		return fmt.Errorf("missing host")
 	}
-	if hasCredentialBearingQuery(parsed.Query()) {
-		return fmt.Errorf("credential-bearing query parameters are not allowed")
+	if parsed.RawQuery != "" {
+		return fmt.Errorf("query string is not allowed")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("host %q is not allowed", host)
+		}
 	}
 	if len(cfg.HTTPAllowedHosts) != 0 {
 		allowed := false
@@ -695,7 +706,7 @@ func remoteFetchClient(cfg Config) *http.Client {
 	transport.ResponseHeaderTimeout = timeout
 	transport.IdleConnTimeout = 30 * time.Second
 	return &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= maxRedirects {
@@ -1085,16 +1096,6 @@ func ParseInputSpecsFromEnv(env []string, workRoot string) ([]InputSpec, error) 
 		})
 	}
 	return inputs, nil
-}
-
-func hasCredentialBearingQuery(values url.Values) bool {
-	for key := range values {
-		switch strings.ToLower(strings.TrimSpace(key)) {
-		case "access_token", "token", "sig", "signature", "x-amz-signature", "x-amz-credential", "x-goog-signature", "x-goog-credential", "awsaccesskeyid":
-			return true
-		}
-	}
-	return false
 }
 
 func ensurePartial(partials map[string]*partialInputSpec, base string) *partialInputSpec {

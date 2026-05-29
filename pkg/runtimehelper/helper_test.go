@@ -17,6 +17,20 @@ import (
 	"github.com/HeaInSeo/node-artifact-runtime/pkg/provenance"
 )
 
+func localhostURL(t *testing.T, raw string) string {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	if port := parsed.Port(); port != "" {
+		parsed.Host = "localhost:" + port
+	} else {
+		parsed.Host = "localhost"
+	}
+	return parsed.String()
+}
+
 func TestRunWritesManifestAndTerminationLog(t *testing.T) {
 	tmpDir := t.TempDir()
 	manifestPath := filepath.Join(tmpDir, "_meta", "artifacts.manifest.json")
@@ -330,14 +344,14 @@ func TestRunMaterializesRemoteFetchInputAndInjectsLocalPath(t *testing.T) {
 	defer server.Close()
 
 	exitCode := Run(context.Background(), Config{
-		RunID:        "run-7",
-		NodeID:       "consume",
-		Inputs:       []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: expectedDigest, MaterializationMode: "remote_fetch"}},
-		WorkRoot:     tmpDir,
-		HTTPAllowAny: true,
-		OutputRoot:   tmpDir,
-		Outputs:      []OutputSpec{{Name: "copied", Path: "copied", Required: true, Type: "file"}},
-		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		RunID:            "run-7",
+		NodeID:           "consume",
+		Inputs:           []InputSpec{{Name: "dataset", URI: localhostURL(t, server.URL) + "/dataset", ExpectedDigest: expectedDigest, MaterializationMode: "remote_fetch"}},
+		WorkRoot:         tmpDir,
+		HTTPAllowedHosts: []string{"localhost"},
+		OutputRoot:       tmpDir,
+		Outputs:          []OutputSpec{{Name: "copied", Path: "copied", Required: true, Type: "file"}},
+		ManifestPath:     filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
 		Command: []string{"sh", "-c", fmt.Sprintf(
 			"cat \"$JUMI_INPUT_DATASET_LOCAL_PATH\" > %q",
 			filepath.Join(tmpDir, "copied"),
@@ -364,14 +378,14 @@ func TestRunFailsOnRemoteFetchDigestMismatch(t *testing.T) {
 	defer server.Close()
 
 	exitCode := Run(context.Background(), Config{
-		RunID:        "run-8",
-		NodeID:       "consume",
-		Inputs:       []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
-		WorkRoot:     tmpDir,
-		HTTPAllowAny: true,
-		OutputRoot:   tmpDir,
-		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
-		Command:      []string{"sh", "-c", "exit 0"},
+		RunID:            "run-8",
+		NodeID:           "consume",
+		Inputs:           []InputSpec{{Name: "dataset", URI: localhostURL(t, server.URL) + "/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
+		WorkRoot:         tmpDir,
+		HTTPAllowedHosts: []string{"localhost"},
+		OutputRoot:       tmpDir,
+		ManifestPath:     filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:          []string{"sh", "-c", "exit 0"},
 	})
 	if exitCode != ExitMaterializeFailed {
 		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
@@ -414,12 +428,29 @@ func TestRunFailsOnRemoteFetchCredentialBearingUserinfo(t *testing.T) {
 	}
 }
 
-func TestRunFailsOnRemoteFetchCredentialBearingQuery(t *testing.T) {
+func TestRunFailsOnRemoteFetchWithAnyQuery(t *testing.T) {
 	tmpDir := t.TempDir()
 	exitCode := Run(context.Background(), Config{
 		RunID:        "run-8b-query",
 		NodeID:       "consume",
-		Inputs:       []InputSpec{{Name: "dataset", URI: "https://example.com/dataset?token=secret", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
+		Inputs:       []InputSpec{{Name: "dataset", URI: "https://example.com/dataset?download=true", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
+		WorkRoot:     tmpDir,
+		OutputRoot:   tmpDir,
+		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:      []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
+	}
+}
+
+func TestRunFailsOnRemoteFetchLoopbackHost(t *testing.T) {
+	tmpDir := t.TempDir()
+	exitCode := Run(context.Background(), Config{
+		RunID:        "run-8b-loopback",
+		NodeID:       "consume",
+		Inputs:       []InputSpec{{Name: "dataset", URI: "http://127.0.0.1:8080/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
+		HTTPAllowAny: true,
 		WorkRoot:     tmpDir,
 		OutputRoot:   tmpDir,
 		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
@@ -440,7 +471,7 @@ func TestRunFailsOnRemoteFetchDisallowedHost(t *testing.T) {
 	exitCode := Run(context.Background(), Config{
 		RunID:            "run-8c",
 		NodeID:           "consume",
-		Inputs:           []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
+		Inputs:           []InputSpec{{Name: "dataset", URI: localhostURL(t, server.URL) + "/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
 		WorkRoot:         tmpDir,
 		OutputRoot:       tmpDir,
 		HTTPAllowedHosts: []string{"artifact-source.local"},
@@ -465,7 +496,7 @@ func TestRunFailsOnRemoteFetchWithoutAllowlistByDefault(t *testing.T) {
 	exitCode := Run(context.Background(), Config{
 		RunID:        "run-8c-default",
 		NodeID:       "consume",
-		Inputs:       []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: expectedDigest, MaterializationMode: "remote_fetch"}},
+		Inputs:       []InputSpec{{Name: "dataset", URI: localhostURL(t, server.URL) + "/dataset", ExpectedDigest: expectedDigest, MaterializationMode: "remote_fetch"}},
 		WorkRoot:     tmpDir,
 		OutputRoot:   tmpDir,
 		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
@@ -484,17 +515,44 @@ func TestRunFailsOnRemoteFetchRedirectToDisallowedHost(t *testing.T) {
 	}))
 	defer server.Close()
 
-	parsed, err := url.Parse(server.URL)
+	parsed, err := url.Parse(localhostURL(t, server.URL))
 	if err != nil {
 		t.Fatalf("parse server url: %v", err)
 	}
 	exitCode := Run(context.Background(), Config{
 		RunID:            "run-8d",
 		NodeID:           "consume",
-		Inputs:           []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
+		Inputs:           []InputSpec{{Name: "dataset", URI: localhostURL(t, server.URL) + "/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
 		WorkRoot:         tmpDir,
 		OutputRoot:       tmpDir,
 		HTTPAllowedHosts: []string{strings.ToLower(parsed.Hostname())},
+		ManifestPath:     filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:          []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
+	}
+}
+
+func TestRunFailsOnRemoteFetchRedirectTargetWithAnyQuery(t *testing.T) {
+	tmpDir := t.TempDir()
+	redirectTarget := "https://artifact-source.local/artifact?download=true"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirectTarget, http.StatusFound)
+	}))
+	defer server.Close()
+
+	parsed, err := url.Parse(localhostURL(t, server.URL))
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+	exitCode := Run(context.Background(), Config{
+		RunID:            "run-8d-query",
+		NodeID:           "consume",
+		Inputs:           []InputSpec{{Name: "dataset", URI: localhostURL(t, server.URL) + "/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
+		WorkRoot:         tmpDir,
+		OutputRoot:       tmpDir,
+		HTTPAllowedHosts: []string{strings.ToLower(parsed.Hostname()), "artifact-source.local"},
 		ManifestPath:     filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
 		Command:          []string{"sh", "-c", "exit 0"},
 	})
@@ -515,14 +573,14 @@ func TestRunFailsOnRemoteFetchExpectedSizeMismatch(t *testing.T) {
 	defer server.Close()
 
 	exitCode := Run(context.Background(), Config{
-		RunID:        "run-8e",
-		NodeID:       "consume",
-		Inputs:       []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: expectedDigest, ExpectedSizeBytes: 7, MaterializationMode: "remote_fetch"}},
-		WorkRoot:     tmpDir,
-		HTTPAllowAny: true,
-		OutputRoot:   tmpDir,
-		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
-		Command:      []string{"sh", "-c", "exit 0"},
+		RunID:            "run-8e",
+		NodeID:           "consume",
+		Inputs:           []InputSpec{{Name: "dataset", URI: localhostURL(t, server.URL) + "/dataset", ExpectedDigest: expectedDigest, ExpectedSizeBytes: 7, MaterializationMode: "remote_fetch"}},
+		WorkRoot:         tmpDir,
+		HTTPAllowedHosts: []string{"localhost"},
+		OutputRoot:       tmpDir,
+		ManifestPath:     filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:          []string{"sh", "-c", "exit 0"},
 	})
 	if exitCode != ExitMaterializeFailed {
 		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
@@ -804,14 +862,14 @@ func TestRunFailsWhenInputsPathIsSymlink(t *testing.T) {
 	defer server.Close()
 
 	exitCode := Run(context.Background(), Config{
-		RunID:        "run-12d",
-		NodeID:       "consume",
-		Inputs:       []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: expectedDigest, MaterializationMode: "remote_fetch"}},
-		WorkRoot:     tmpDir,
-		HTTPAllowAny: true,
-		OutputRoot:   tmpDir,
-		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
-		Command:      []string{"sh", "-c", "exit 0"},
+		RunID:            "run-12d",
+		NodeID:           "consume",
+		Inputs:           []InputSpec{{Name: "dataset", URI: localhostURL(t, server.URL) + "/dataset", ExpectedDigest: expectedDigest, MaterializationMode: "remote_fetch"}},
+		WorkRoot:         tmpDir,
+		HTTPAllowedHosts: []string{"localhost"},
+		OutputRoot:       tmpDir,
+		ManifestPath:     filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:          []string{"sh", "-c", "exit 0"},
 	})
 	if exitCode != ExitMaterializeFailed {
 		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
@@ -863,5 +921,19 @@ func TestParseInputSpecsFromEnvRejectsInvalidExpectedSize(t *testing.T) {
 		"JUMI_INPUT_DATASET_MATERIALIZATION_MODE=remote_fetch",
 	}, "/work"); err == nil {
 		t.Fatal("expected parse error for invalid expected size")
+	}
+}
+
+func TestConfigValidateRejectsNegativeExpectedSize(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := Config{
+		RunID:        "run-negative-size",
+		NodeID:       "node-a",
+		OutputRoot:   tmpDir,
+		ManifestPath: filepath.Join(tmpDir, "artifacts.manifest.json"),
+		Inputs:       []InputSpec{{Name: "dataset", ExpectedSizeBytes: -1}},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected negative expected size to be rejected")
 	}
 }
