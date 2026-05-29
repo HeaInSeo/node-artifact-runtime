@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/HeaInSeo/node-artifact-runtime/pkg/contract"
 	"github.com/HeaInSeo/node-artifact-runtime/pkg/provenance"
@@ -91,6 +92,10 @@ func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputName
 	nodeLocalArtifactRoot := os.Getenv("JUMI_NODE_LOCAL_ARTIFACT_ROOT")
 	httpAllowedHosts := parseCommaSeparated(os.Getenv("JUMI_ALLOWED_HTTP_SOURCE_HOSTS"))
 	httpAllowAny := parseBoolEnv(os.Getenv("JUMI_ALLOW_ANY_HTTP_SOURCE"))
+	httpTimeout, err := parsePositiveDurationEnv("JUMI_HTTP_SOURCE_TIMEOUT")
+	if err != nil {
+		return runtimehelper.Config{}, err
+	}
 	httpMaxRedirects := parsePositiveInt(os.Getenv("JUMI_HTTP_SOURCE_MAX_REDIRECTS"))
 	httpMaxInputBytes := parsePositiveInt64(os.Getenv("JUMI_HTTP_SOURCE_MAX_INPUT_BYTES"))
 	if contractPath != "" {
@@ -103,22 +108,31 @@ func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputName
 		cfg.NodeLocalArtifactRoot = nodeLocalArtifactRoot
 		cfg.HTTPAllowedHosts = httpAllowedHosts
 		cfg.HTTPAllowAny = httpAllowAny
+		cfg.HTTPTimeout = httpTimeout
 		cfg.HTTPMaxRedirects = httpMaxRedirects
 		cfg.HTTPMaxInputBytes = httpMaxInputBytes
-		cfg.Inputs = runtimehelper.ParseInputSpecsFromEnv(os.Environ(), cfg.WorkRoot)
+		cfg.Inputs, err = runtimehelper.ParseInputSpecsFromEnv(os.Environ(), cfg.WorkRoot)
+		if err != nil {
+			return runtimehelper.Config{}, err
+		}
 		return cfg, nil
+	}
+	inputs, err := runtimehelper.ParseInputSpecsFromEnv(os.Environ(), workRoot)
+	if err != nil {
+		return runtimehelper.Config{}, err
 	}
 	return runtimehelper.Config{
 		RunID:                 runID,
 		SampleRunID:           sampleRunID,
 		NodeID:                nodeID,
 		AttemptID:             attemptID,
-		Inputs:                runtimehelper.ParseInputSpecsFromEnv(os.Environ(), workRoot),
+		Inputs:                inputs,
 		OutputNames:           runtimehelper.ParseOutputNames(outputNames),
 		WorkRoot:              workRoot,
 		NodeLocalArtifactRoot: nodeLocalArtifactRoot,
 		HTTPAllowedHosts:      httpAllowedHosts,
 		HTTPAllowAny:          httpAllowAny,
+		HTTPTimeout:           httpTimeout,
 		HTTPMaxRedirects:      httpMaxRedirects,
 		HTTPMaxInputBytes:     httpMaxInputBytes,
 		OutputRoot:            outputRoot,
@@ -170,4 +184,19 @@ func parsePositiveInt64(raw string) int64 {
 		return value
 	}
 	return 0
+}
+
+func parsePositiveDurationEnv(key string) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", key, err)
+	}
+	if value <= 0 {
+		return 0, fmt.Errorf("invalid %s: must be > 0", key)
+	}
+	return value, nil
 }

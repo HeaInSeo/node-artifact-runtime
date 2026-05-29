@@ -100,6 +100,7 @@ type Config struct {
 	NodeLocalArtifactRoot string
 	HTTPAllowedHosts      []string
 	HTTPAllowAny          bool
+	HTTPTimeout           time.Duration
 	HTTPMaxRedirects      int
 	HTTPMaxInputBytes     int64
 	Outputs               []OutputSpec
@@ -568,7 +569,8 @@ func materializeLocalReuseInput(_ context.Context, cfg Config, input InputSpec) 
 	defer sourceFile.Close()
 
 	hash := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(tmpFile, hash), sourceFile); err != nil {
+	written, err := io.Copy(io.MultiWriter(tmpFile, hash), sourceFile)
+	if err != nil {
 		_ = tmpFile.Close()
 		return fmt.Errorf("%w: copy node-local input %s: %v", errMaterializeFailed, input.Name, err)
 	}
@@ -583,6 +585,9 @@ func materializeLocalReuseInput(_ context.Context, cfg Config, input InputSpec) 
 	actualDigest := "sha256:" + hex.EncodeToString(hash.Sum(nil))
 	if actualDigest != strings.TrimSpace(input.ExpectedDigest) {
 		return fmt.Errorf("%w: input %s digest mismatch: got %s want %s", errMaterializeFailed, input.Name, actualDigest, input.ExpectedDigest)
+	}
+	if input.ExpectedSizeBytes > 0 && written != input.ExpectedSizeBytes {
+		return fmt.Errorf("%w: input %s size mismatch: got %d want %d", errMaterializeFailed, input.Name, written, input.ExpectedSizeBytes)
 	}
 	if err := os.Rename(tmpName, targetPath); err != nil {
 		return fmt.Errorf("%w: move input %s into place: %v", errMaterializeFailed, input.Name, err)
@@ -614,6 +619,21 @@ func validateNodeLocalSourcePath(cfg Config, sourcePath string) error {
 	if info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("node-local source path %q must not be a symlink", sourcePath)
 	}
+	realRoot, err := filepath.EvalSymlinks(cleanedRoot)
+	if err != nil {
+		return fmt.Errorf("resolve node-local artifact root: %w", err)
+	}
+	realPath, err := filepath.EvalSymlinks(cleanedPath)
+	if err != nil {
+		return fmt.Errorf("resolve node-local source path: %w", err)
+	}
+	realRel, err := filepath.Rel(realRoot, realPath)
+	if err != nil {
+		return err
+	}
+	if realRel == "." || realRel == ".." || strings.HasPrefix(realRel, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("node-local source path %q escapes resolved root %q", sourcePath, realRoot)
+	}
 	return nil
 }
 
@@ -635,9 +655,15 @@ func validateRemoteFetchURI(cfg Config, rawURI string) error {
 	default:
 		return fmt.Errorf("unsupported scheme %q", parsed.Scheme)
 	}
+	if parsed.User != nil {
+		return fmt.Errorf("credential-bearing userinfo is not allowed")
+	}
 	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
 	if host == "" {
 		return fmt.Errorf("missing host")
+	}
+	if hasCredentialBearingQuery(parsed.Query()) {
+		return fmt.Errorf("credential-bearing query parameters are not allowed")
 	}
 	if len(cfg.HTTPAllowedHosts) != 0 {
 		allowed := false
@@ -661,7 +687,16 @@ func remoteFetchClient(cfg Config) *http.Client {
 	if maxRedirects <= 0 {
 		maxRedirects = 3
 	}
+	timeout := cfg.HTTPTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = timeout
+	transport.IdleConnTimeout = 30 * time.Second
 	return &http.Client{
+		Timeout: timeout,
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= maxRedirects {
 				return fmt.Errorf("too many redirects")
@@ -874,11 +909,6 @@ func promoteOutputToNodeLocalCAS(cfg Config, output OutputSpec, sourcePath strin
 	} else if ok {
 		return &provenance.NodeLocalLocation{Path: finalPath}, digest, size, nil
 	}
-	if ok, err := verifyExistingCASArtifact(finalPath, digest); err != nil {
-		return nil, "", 0, err
-	} else if ok {
-		return &provenance.NodeLocalLocation{Path: finalPath}, digest, size, nil
-	}
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		return nil, "", 0, fmt.Errorf("%w: move promoted output %s into CAS: %v", errInspectFailed, output.Name, err)
 	}
@@ -988,7 +1018,7 @@ func ConfigFromContract(c contract.NodeContract) Config {
 	}
 }
 
-func ParseInputSpecsFromEnv(env []string, workRoot string) []InputSpec {
+func ParseInputSpecsFromEnv(env []string, workRoot string) ([]InputSpec, error) {
 	byBase := map[string]*partialInputSpec{}
 	for _, entry := range env {
 		key, value, ok := strings.Cut(entry, "=")
@@ -1035,9 +1065,14 @@ func ParseInputSpecsFromEnv(env []string, workRoot string) []InputSpec {
 		}
 		expectedSizeBytes := int64(0)
 		if strings.TrimSpace(p.expectedSizeBytes) != "" {
-			if parsed, err := strconv.ParseInt(strings.TrimSpace(p.expectedSizeBytes), 10, 64); err == nil && parsed > 0 {
-				expectedSizeBytes = parsed
+			parsed, err := strconv.ParseInt(strings.TrimSpace(p.expectedSizeBytes), 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("%w: invalid expected size for input %s: %v", errInvalidConfig, base, err)
 			}
+			if parsed <= 0 {
+				return nil, fmt.Errorf("%w: invalid expected size for input %s: must be > 0", errInvalidConfig, base)
+			}
+			expectedSizeBytes = parsed
 		}
 		inputs = append(inputs, InputSpec{
 			Name:                strings.ToLower(base),
@@ -1049,7 +1084,17 @@ func ParseInputSpecsFromEnv(env []string, workRoot string) []InputSpec {
 			LocalPath:           firstNonEmpty(p.localPath, filepath.Join("inputs", strings.ToLower(base))),
 		})
 	}
-	return inputs
+	return inputs, nil
+}
+
+func hasCredentialBearingQuery(values url.Values) bool {
+	for key := range values {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "access_token", "token", "sig", "signature", "x-amz-signature", "x-amz-credential", "x-goog-signature", "x-goog-credential", "awsaccesskeyid":
+			return true
+		}
+	}
+	return false
 }
 
 func ensurePartial(partials map[string]*partialInputSpec, base string) *partialInputSpec {

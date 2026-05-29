@@ -398,6 +398,38 @@ func TestRunFailsOnRemoteFetchUnsupportedScheme(t *testing.T) {
 	}
 }
 
+func TestRunFailsOnRemoteFetchCredentialBearingUserinfo(t *testing.T) {
+	tmpDir := t.TempDir()
+	exitCode := Run(context.Background(), Config{
+		RunID:        "run-8b-userinfo",
+		NodeID:       "consume",
+		Inputs:       []InputSpec{{Name: "dataset", URI: "http://user:pass@example.com/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
+		WorkRoot:     tmpDir,
+		OutputRoot:   tmpDir,
+		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:      []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
+	}
+}
+
+func TestRunFailsOnRemoteFetchCredentialBearingQuery(t *testing.T) {
+	tmpDir := t.TempDir()
+	exitCode := Run(context.Background(), Config{
+		RunID:        "run-8b-query",
+		NodeID:       "consume",
+		Inputs:       []InputSpec{{Name: "dataset", URI: "https://example.com/dataset?token=secret", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
+		WorkRoot:     tmpDir,
+		OutputRoot:   tmpDir,
+		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:      []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
+	}
+}
+
 func TestRunFailsOnRemoteFetchDisallowedHost(t *testing.T) {
 	tmpDir := t.TempDir()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -497,6 +529,13 @@ func TestRunFailsOnRemoteFetchExpectedSizeMismatch(t *testing.T) {
 	}
 }
 
+func TestRemoteFetchClientHasDefaultTimeout(t *testing.T) {
+	client := remoteFetchClient(Config{})
+	if client.Timeout <= 0 {
+		t.Fatalf("client.Timeout = %s, want > 0", client.Timeout)
+	}
+}
+
 func TestRunMaterializesLocalReuseInputAndInjectsLocalPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	nodeLocalDir := filepath.Join(tmpDir, "node-local")
@@ -564,6 +603,35 @@ func TestRunFailsOnLocalReuseDigestMismatch(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(tmpDir, "inputs", "dataset")); !os.IsNotExist(err) {
 		t.Fatalf("materialized input exists after digest mismatch, stat err = %v", err)
+	}
+}
+
+func TestRunFailsOnLocalReuseExpectedSizeMismatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	nodeLocalDir := filepath.Join(tmpDir, "node-local")
+	if err := os.MkdirAll(nodeLocalDir, 0o755); err != nil {
+		t.Fatalf("mkdir node-local dir: %v", err)
+	}
+	payload := []byte("local-size")
+	sourcePath := filepath.Join(nodeLocalDir, "artifact.bin")
+	if err := os.WriteFile(sourcePath, payload, 0o644); err != nil {
+		t.Fatalf("write source artifact: %v", err)
+	}
+	sum := sha256.Sum256(payload)
+	expectedDigest := "sha256:" + hex.EncodeToString(sum[:])
+
+	exitCode := Run(context.Background(), Config{
+		RunID:                 "run-10b",
+		NodeID:                "consume",
+		Inputs:                []InputSpec{{Name: "dataset", NodeLocalPath: sourcePath, ExpectedDigest: expectedDigest, ExpectedSizeBytes: 1, MaterializationMode: "local_reuse"}},
+		WorkRoot:              tmpDir,
+		NodeLocalArtifactRoot: nodeLocalDir,
+		OutputRoot:            tmpDir,
+		ManifestPath:          filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:               []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
 	}
 }
 
@@ -651,6 +719,43 @@ func TestRunFailsOnLocalReuseSymlinkSourcePath(t *testing.T) {
 	}
 }
 
+func TestRunFailsOnLocalReuseResolvedRootEscape(t *testing.T) {
+	tmpDir := t.TempDir()
+	realRoot := filepath.Join(tmpDir, "real-root")
+	if err := os.MkdirAll(realRoot, 0o755); err != nil {
+		t.Fatalf("mkdir real root: %v", err)
+	}
+	symlinkRoot := filepath.Join(tmpDir, "node-local")
+	if err := os.Symlink(realRoot, symlinkRoot); err != nil {
+		t.Fatalf("symlink root: %v", err)
+	}
+	outsideDir := filepath.Join(tmpDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	sourcePath := filepath.Join(outsideDir, "artifact.bin")
+	payload := []byte("outside-real-root")
+	if err := os.WriteFile(sourcePath, payload, 0o644); err != nil {
+		t.Fatalf("write outside artifact: %v", err)
+	}
+	sum := sha256.Sum256(payload)
+	expectedDigest := "sha256:" + hex.EncodeToString(sum[:])
+
+	exitCode := Run(context.Background(), Config{
+		RunID:                 "run-12b-realpath",
+		NodeID:                "consume",
+		Inputs:                []InputSpec{{Name: "dataset", NodeLocalPath: sourcePath, ExpectedDigest: expectedDigest, MaterializationMode: "local_reuse"}},
+		WorkRoot:              tmpDir,
+		NodeLocalArtifactRoot: symlinkRoot,
+		OutputRoot:            tmpDir,
+		ManifestPath:          filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:               []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
+	}
+}
+
 func TestRunFailsOnLocalReusePathOutsideInputsSubtree(t *testing.T) {
 	tmpDir := t.TempDir()
 	nodeLocalDir := filepath.Join(tmpDir, "node-local")
@@ -714,7 +819,7 @@ func TestRunFailsWhenInputsPathIsSymlink(t *testing.T) {
 }
 
 func TestParseInputSpecsFromEnv(t *testing.T) {
-	inputs := ParseInputSpecsFromEnv([]string{
+	inputs, err := ParseInputSpecsFromEnv([]string{
 		"JUMI_INPUT_DATASET_URI=http://artifact.local/dataset",
 		"JUMI_INPUT_DATASET_EXPECTED_DIGEST=sha256:abc",
 		"JUMI_INPUT_DATASET_EXPECTED_SIZE_BYTES=17",
@@ -726,6 +831,9 @@ func TestParseInputSpecsFromEnv(t *testing.T) {
 		"JUMI_INPUT_REFERENCE_URI=http://artifact.local/reference",
 		"JUMI_INPUT_REFERENCE_MATERIALIZATION_MODE=none",
 	}, "/work")
+	if err != nil {
+		t.Fatalf("ParseInputSpecsFromEnv() error = %v", err)
+	}
 	if len(inputs) != 3 {
 		t.Fatalf("len(ParseInputSpecsFromEnv()) = %d, want 3", len(inputs))
 	}
@@ -746,5 +854,14 @@ func TestParseInputSpecsFromEnv(t *testing.T) {
 	}
 	if inputs[2].NodeLocalPath != "/jumi-node-artifacts/cas/sha256/def" {
 		t.Fatalf("inputs[2].NodeLocalPath = %q, want node-local path", inputs[2].NodeLocalPath)
+	}
+}
+
+func TestParseInputSpecsFromEnvRejectsInvalidExpectedSize(t *testing.T) {
+	if _, err := ParseInputSpecsFromEnv([]string{
+		"JUMI_INPUT_DATASET_EXPECTED_SIZE_BYTES=abc",
+		"JUMI_INPUT_DATASET_MATERIALIZATION_MODE=remote_fetch",
+	}, "/work"); err == nil {
+		t.Fatal("expected parse error for invalid expected size")
 	}
 }
