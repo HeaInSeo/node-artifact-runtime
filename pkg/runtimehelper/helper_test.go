@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/HeaInSeo/node-artifact-runtime/pkg/provenance"
@@ -377,6 +379,97 @@ func TestRunFailsOnRemoteFetchDigestMismatch(t *testing.T) {
 	}
 }
 
+func TestRunFailsOnRemoteFetchUnsupportedScheme(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	exitCode := Run(context.Background(), Config{
+		RunID:        "run-8b",
+		NodeID:       "consume",
+		Inputs:       []InputSpec{{Name: "dataset", URI: "file:///tmp/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
+		WorkRoot:     tmpDir,
+		OutputRoot:   tmpDir,
+		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:      []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
+	}
+}
+
+func TestRunFailsOnRemoteFetchDisallowedHost(t *testing.T) {
+	tmpDir := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("remote-input-ok"))
+	}))
+	defer server.Close()
+
+	exitCode := Run(context.Background(), Config{
+		RunID:            "run-8c",
+		NodeID:           "consume",
+		Inputs:           []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
+		WorkRoot:         tmpDir,
+		OutputRoot:       tmpDir,
+		HTTPAllowedHosts: []string{"artifact-source.local"},
+		ManifestPath:     filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:          []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
+	}
+}
+
+func TestRunFailsOnRemoteFetchRedirectToDisallowedHost(t *testing.T) {
+	tmpDir := t.TempDir()
+	redirectTarget := "http://disallowed.example/artifact"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirectTarget, http.StatusFound)
+	}))
+	defer server.Close()
+
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+	exitCode := Run(context.Background(), Config{
+		RunID:            "run-8d",
+		NodeID:           "consume",
+		Inputs:           []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
+		WorkRoot:         tmpDir,
+		OutputRoot:       tmpDir,
+		HTTPAllowedHosts: []string{strings.ToLower(parsed.Hostname())},
+		ManifestPath:     filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:          []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
+	}
+}
+
+func TestRunFailsOnRemoteFetchExpectedSizeMismatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	payload := []byte("remote-input-ok")
+	sum := sha256.Sum256(payload)
+	expectedDigest := "sha256:" + hex.EncodeToString(sum[:])
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "99")
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	exitCode := Run(context.Background(), Config{
+		RunID:        "run-8e",
+		NodeID:       "consume",
+		Inputs:       []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: expectedDigest, ExpectedSizeBytes: 7, MaterializationMode: "remote_fetch"}},
+		WorkRoot:     tmpDir,
+		OutputRoot:   tmpDir,
+		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:      []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
+	}
+}
+
 func TestRunMaterializesLocalReuseInputAndInjectsLocalPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	nodeLocalDir := filepath.Join(tmpDir, "node-local")
@@ -564,6 +657,7 @@ func TestParseInputSpecsFromEnv(t *testing.T) {
 	inputs := ParseInputSpecsFromEnv([]string{
 		"JUMI_INPUT_DATASET_URI=http://artifact.local/dataset",
 		"JUMI_INPUT_DATASET_EXPECTED_DIGEST=sha256:abc",
+		"JUMI_INPUT_DATASET_EXPECTED_SIZE_BYTES=17",
 		"JUMI_INPUT_DATASET_MATERIALIZATION_MODE=remote_fetch",
 		"JUMI_INPUT_DATASET_LOCAL_PATH=inputs/result",
 		"JUMI_INPUT_RESULT_NODE_LOCAL_PATH=/jumi-node-artifacts/cas/sha256/def",
@@ -580,6 +674,9 @@ func TestParseInputSpecsFromEnv(t *testing.T) {
 	}
 	if inputs[0].ExpectedDigest != "sha256:abc" {
 		t.Fatalf("inputs[0].ExpectedDigest = %q, want sha256:abc", inputs[0].ExpectedDigest)
+	}
+	if inputs[0].ExpectedSizeBytes != 17 {
+		t.Fatalf("inputs[0].ExpectedSizeBytes = %d, want 17", inputs[0].ExpectedSizeBytes)
 	}
 	if inputs[1].Name != "reference" || inputs[1].MaterializationMode != "none" {
 		t.Fatalf("inputs[1] = %#v", inputs[1])

@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -58,6 +60,7 @@ type InputSpec struct {
 	Name                string
 	URI                 string
 	ExpectedDigest      string
+	ExpectedSizeBytes   int64
 	MaterializationMode string
 	NodeLocalPath       string
 	LocalPath           string
@@ -67,6 +70,7 @@ type partialInputSpec struct {
 	name                string
 	uri                 string
 	expectedDigest      string
+	expectedSizeBytes   string
 	materializationMode string
 	nodeLocalPath       string
 	localPath           string
@@ -94,6 +98,9 @@ type Config struct {
 	Inputs                []InputSpec
 	WorkRoot              string
 	NodeLocalArtifactRoot string
+	HTTPAllowedHosts      []string
+	HTTPMaxRedirects      int
+	HTTPMaxInputBytes     int64
 	Outputs               []OutputSpec
 	OutputRoot            string
 	ManifestPath          string
@@ -447,6 +454,9 @@ func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpe
 	if strings.TrimSpace(input.ExpectedDigest) == "" {
 		return fmt.Errorf("%w: input %s has empty expected digest", errMaterializeFailed, input.Name)
 	}
+	if err := validateRemoteFetchURI(cfg, input.URI); err != nil {
+		return fmt.Errorf("%w: input %s uri rejected: %v", errMaterializeFailed, input.Name, err)
+	}
 	workRoot := effectiveWorkRoot(cfg.WorkRoot)
 	targetPath, err := materializedInputPath(workRoot, input)
 	if err != nil {
@@ -470,7 +480,7 @@ func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpe
 		_ = tmpFile.Close()
 		return fmt.Errorf("%w: create request for input %s: %v", errMaterializeFailed, input.Name, err)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := remoteFetchClient(cfg).Do(req)
 	if err != nil {
 		_ = tmpFile.Close()
 		return fmt.Errorf("%w: fetch input %s: %v", errMaterializeFailed, input.Name, err)
@@ -480,11 +490,25 @@ func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpe
 		_ = tmpFile.Close()
 		return fmt.Errorf("%w: fetch input %s returned status %d", errMaterializeFailed, input.Name, resp.StatusCode)
 	}
+	if maxBytes := effectiveHTTPMaxInputBytes(cfg, input); maxBytes > 0 && resp.ContentLength > maxBytes {
+		_ = tmpFile.Close()
+		return fmt.Errorf("%w: input %s content-length %d exceeds limit %d", errMaterializeFailed, input.Name, resp.ContentLength, maxBytes)
+	}
 
 	hash := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(tmpFile, hash), resp.Body); err != nil {
+	limit := effectiveHTTPMaxInputBytes(cfg, input)
+	var bodyReader io.Reader = resp.Body
+	if limit > 0 {
+		bodyReader = io.LimitReader(resp.Body, limit+1)
+	}
+	written, err := io.Copy(io.MultiWriter(tmpFile, hash), bodyReader)
+	if err != nil {
 		_ = tmpFile.Close()
 		return fmt.Errorf("%w: read input %s: %v", errMaterializeFailed, input.Name, err)
+	}
+	if limit > 0 && written > limit {
+		_ = tmpFile.Close()
+		return fmt.Errorf("%w: input %s exceeds size limit %d", errMaterializeFailed, input.Name, limit)
 	}
 	if err := tmpFile.Sync(); err != nil {
 		_ = tmpFile.Close()
@@ -497,6 +521,9 @@ func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpe
 	actualDigest := "sha256:" + hex.EncodeToString(hash.Sum(nil))
 	if actualDigest != strings.TrimSpace(input.ExpectedDigest) {
 		return fmt.Errorf("%w: input %s digest mismatch: got %s want %s", errMaterializeFailed, input.Name, actualDigest, input.ExpectedDigest)
+	}
+	if input.ExpectedSizeBytes > 0 && written != input.ExpectedSizeBytes {
+		return fmt.Errorf("%w: input %s size mismatch: got %d want %d", errMaterializeFailed, input.Name, written, input.ExpectedSizeBytes)
 	}
 	if err := os.Rename(tmpName, targetPath); err != nil {
 		return fmt.Errorf("%w: move input %s into place: %v", errMaterializeFailed, input.Name, err)
@@ -595,6 +622,60 @@ func materializedInputPath(workRoot string, input InputSpec) (string, error) {
 		return secureInputMaterializedPath(workRoot, input.LocalPath)
 	}
 	return secureInputMaterializedPath(workRoot, filepath.Join("inputs", strings.ToLower(safeInputName(input.Name))))
+}
+
+func validateRemoteFetchURI(cfg Config, rawURI string) error {
+	parsed, err := url.Parse(strings.TrimSpace(rawURI))
+	if err != nil {
+		return err
+	}
+	switch parsed.Scheme {
+	case "http", "https":
+	default:
+		return fmt.Errorf("unsupported scheme %q", parsed.Scheme)
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	if host == "" {
+		return fmt.Errorf("missing host")
+	}
+	if len(cfg.HTTPAllowedHosts) != 0 {
+		allowed := false
+		for _, candidate := range cfg.HTTPAllowedHosts {
+			if strings.EqualFold(strings.TrimSpace(candidate), host) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return fmt.Errorf("host %q is not in allowlist", host)
+		}
+	}
+	return nil
+}
+
+func remoteFetchClient(cfg Config) *http.Client {
+	maxRedirects := cfg.HTTPMaxRedirects
+	if maxRedirects <= 0 {
+		maxRedirects = 3
+	}
+	return &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= maxRedirects {
+				return fmt.Errorf("too many redirects")
+			}
+			if len(via) > 0 && via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme == "http" {
+				return fmt.Errorf("redirect scheme downgrade is not allowed")
+			}
+			return validateRemoteFetchURI(cfg, req.URL.String())
+		},
+	}
+}
+
+func effectiveHTTPMaxInputBytes(cfg Config, input InputSpec) int64 {
+	if input.ExpectedSizeBytes > 0 {
+		return input.ExpectedSizeBytes
+	}
+	return cfg.HTTPMaxInputBytes
 }
 
 func secureInputMaterializedPath(workRoot, relativePath string) (string, error) {
@@ -895,6 +976,10 @@ func ParseInputSpecsFromEnv(env []string, workRoot string) []InputSpec {
 			base := strings.TrimSuffix(strings.TrimPrefix(key, "JUMI_INPUT_"), "_EXPECTED_DIGEST")
 			p := ensurePartial(byBase, base)
 			p.expectedDigest = value
+		case strings.HasSuffix(key, "_EXPECTED_SIZE_BYTES"):
+			base := strings.TrimSuffix(strings.TrimPrefix(key, "JUMI_INPUT_"), "_EXPECTED_SIZE_BYTES")
+			p := ensurePartial(byBase, base)
+			p.expectedSizeBytes = value
 		case strings.HasSuffix(key, "_MATERIALIZATION_MODE"):
 			base := strings.TrimSuffix(strings.TrimPrefix(key, "JUMI_INPUT_"), "_MATERIALIZATION_MODE")
 			p := ensurePartial(byBase, base)
@@ -920,10 +1005,17 @@ func ParseInputSpecsFromEnv(env []string, workRoot string) []InputSpec {
 		if strings.TrimSpace(p.materializationMode) == "" {
 			continue
 		}
+		expectedSizeBytes := int64(0)
+		if strings.TrimSpace(p.expectedSizeBytes) != "" {
+			if parsed, err := strconv.ParseInt(strings.TrimSpace(p.expectedSizeBytes), 10, 64); err == nil && parsed > 0 {
+				expectedSizeBytes = parsed
+			}
+		}
 		inputs = append(inputs, InputSpec{
 			Name:                strings.ToLower(base),
 			URI:                 p.uri,
 			ExpectedDigest:      p.expectedDigest,
+			ExpectedSizeBytes:   expectedSizeBytes,
 			MaterializationMode: p.materializationMode,
 			NodeLocalPath:       p.nodeLocalPath,
 			LocalPath:           firstNonEmpty(p.localPath, filepath.Join("inputs", strings.ToLower(base))),

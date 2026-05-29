@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/HeaInSeo/node-artifact-runtime/pkg/contract"
 	"github.com/HeaInSeo/node-artifact-runtime/pkg/provenance"
@@ -87,6 +89,9 @@ func inspectCommand(args []string) int {
 
 func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputNames, workRoot, outputRoot, manifestPath, terminationLogPath string) (runtimehelper.Config, error) {
 	nodeLocalArtifactRoot := os.Getenv("JUMI_NODE_LOCAL_ARTIFACT_ROOT")
+	httpAllowedHosts := parseCommaSeparated(os.Getenv("JUMI_ALLOWED_HTTP_SOURCE_HOSTS"))
+	httpMaxRedirects := parsePositiveInt(os.Getenv("JUMI_HTTP_SOURCE_MAX_REDIRECTS"))
+	httpMaxInputBytes := parsePositiveInt64(os.Getenv("JUMI_HTTP_SOURCE_MAX_INPUT_BYTES"))
 	if contractPath != "" {
 		c, err := contract.Load(contractPath)
 		if err != nil {
@@ -95,6 +100,9 @@ func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputName
 		cfg := runtimehelper.ConfigFromContract(c)
 		cfg.TerminationLogPath = terminationLogPath
 		cfg.NodeLocalArtifactRoot = nodeLocalArtifactRoot
+		cfg.HTTPAllowedHosts = httpAllowedHosts
+		cfg.HTTPMaxRedirects = httpMaxRedirects
+		cfg.HTTPMaxInputBytes = httpMaxInputBytes
 		cfg.Inputs = runtimehelper.ParseInputSpecsFromEnv(os.Environ(), cfg.WorkRoot)
 		return cfg, nil
 	}
@@ -107,8 +115,47 @@ func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputName
 		OutputNames:           runtimehelper.ParseOutputNames(outputNames),
 		WorkRoot:              workRoot,
 		NodeLocalArtifactRoot: nodeLocalArtifactRoot,
+		HTTPAllowedHosts:      httpAllowedHosts,
+		HTTPMaxRedirects:      httpMaxRedirects,
+		HTTPMaxInputBytes:     httpMaxInputBytes,
 		OutputRoot:            outputRoot,
 		ManifestPath:          manifestPath,
 		TerminationLogPath:    terminationLogPath,
 	}, nil
+}
+
+func parseCommaSeparated(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		value := strings.TrimSpace(part)
+		if value == "" {
+			continue
+		}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func parsePositiveInt(raw string) int {
+	value, _ := strconv.Atoi(strings.TrimSpace(raw))
+	if value > 0 {
+		return value
+	}
+	return 0
+}
+
+func parsePositiveInt64(raw string) int64 {
+	value, _ := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if value > 0 {
+		return value
+	}
+	return 0
 }
