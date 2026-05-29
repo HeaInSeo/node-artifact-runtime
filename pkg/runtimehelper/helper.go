@@ -99,6 +99,7 @@ type Config struct {
 	WorkRoot              string
 	NodeLocalArtifactRoot string
 	HTTPAllowedHosts      []string
+	HTTPAllowAny          bool
 	HTTPMaxRedirects      int
 	HTTPMaxInputBytes     int64
 	Outputs               []OutputSpec
@@ -649,6 +650,8 @@ func validateRemoteFetchURI(cfg Config, rawURI string) error {
 		if !allowed {
 			return fmt.Errorf("host %q is not in allowlist", host)
 		}
+	} else if !cfg.HTTPAllowAny {
+		return fmt.Errorf("http source allowlist is required")
 	}
 	return nil
 }
@@ -700,7 +703,32 @@ func secureInputMaterializedPath(workRoot, relativePath string) (string, error) 
 	if rel == "inputs" || !strings.HasPrefix(rel, inputsPrefix) {
 		return "", fmt.Errorf("materialized path must stay under inputs/")
 	}
+	if err := ensureNoSymlinkPathPrefix(workRoot, rel); err != nil {
+		return "", err
+	}
 	return candidate, nil
+}
+
+func ensureNoSymlinkPathPrefix(workRoot, relativePath string) error {
+	current := filepath.Clean(workRoot)
+	parts := strings.Split(relativePath, string(os.PathSeparator))
+	for i, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				if i == len(parts)-1 {
+					return nil
+				}
+				continue
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("materialized path traverses symlink %q", current)
+		}
+	}
+	return nil
 }
 
 func safeInputName(name string) string {

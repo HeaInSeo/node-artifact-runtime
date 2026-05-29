@@ -90,6 +90,7 @@ func inspectCommand(args []string) int {
 func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputNames, workRoot, outputRoot, manifestPath, terminationLogPath string) (runtimehelper.Config, error) {
 	nodeLocalArtifactRoot := os.Getenv("JUMI_NODE_LOCAL_ARTIFACT_ROOT")
 	httpAllowedHosts := parseCommaSeparated(os.Getenv("JUMI_ALLOWED_HTTP_SOURCE_HOSTS"))
+	httpAllowAny := parseBoolEnv(os.Getenv("JUMI_ALLOW_ANY_HTTP_SOURCE"))
 	httpMaxRedirects := parsePositiveInt(os.Getenv("JUMI_HTTP_SOURCE_MAX_REDIRECTS"))
 	httpMaxInputBytes := parsePositiveInt64(os.Getenv("JUMI_HTTP_SOURCE_MAX_INPUT_BYTES"))
 	if contractPath != "" {
@@ -101,6 +102,7 @@ func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputName
 		cfg.TerminationLogPath = terminationLogPath
 		cfg.NodeLocalArtifactRoot = nodeLocalArtifactRoot
 		cfg.HTTPAllowedHosts = httpAllowedHosts
+		cfg.HTTPAllowAny = httpAllowAny
 		cfg.HTTPMaxRedirects = httpMaxRedirects
 		cfg.HTTPMaxInputBytes = httpMaxInputBytes
 		cfg.Inputs = runtimehelper.ParseInputSpecsFromEnv(os.Environ(), cfg.WorkRoot)
@@ -116,6 +118,7 @@ func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputName
 		WorkRoot:              workRoot,
 		NodeLocalArtifactRoot: nodeLocalArtifactRoot,
 		HTTPAllowedHosts:      httpAllowedHosts,
+		HTTPAllowAny:          httpAllowAny,
 		HTTPMaxRedirects:      httpMaxRedirects,
 		HTTPMaxInputBytes:     httpMaxInputBytes,
 		OutputRoot:            outputRoot,
@@ -142,6 +145,15 @@ func parseCommaSeparated(raw string) []string {
 		return nil
 	}
 	return out
+}
+
+func parseBoolEnv(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func parsePositiveInt(raw string) int {

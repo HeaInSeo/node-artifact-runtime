@@ -334,6 +334,7 @@ func TestRunMaterializesRemoteFetchInputAndInjectsLocalPath(t *testing.T) {
 		NodeID:       "consume",
 		Inputs:       []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: expectedDigest, MaterializationMode: "remote_fetch"}},
 		WorkRoot:     tmpDir,
+		HTTPAllowAny: true,
 		OutputRoot:   tmpDir,
 		Outputs:      []OutputSpec{{Name: "copied", Path: "copied", Required: true, Type: "file"}},
 		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
@@ -367,6 +368,7 @@ func TestRunFailsOnRemoteFetchDigestMismatch(t *testing.T) {
 		NodeID:       "consume",
 		Inputs:       []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
 		WorkRoot:     tmpDir,
+		HTTPAllowAny: true,
 		OutputRoot:   tmpDir,
 		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
 		Command:      []string{"sh", "-c", "exit 0"},
@@ -418,6 +420,30 @@ func TestRunFailsOnRemoteFetchDisallowedHost(t *testing.T) {
 	}
 }
 
+func TestRunFailsOnRemoteFetchWithoutAllowlistByDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	payload := []byte("remote-input-ok")
+	sum := sha256.Sum256(payload)
+	expectedDigest := "sha256:" + hex.EncodeToString(sum[:])
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	exitCode := Run(context.Background(), Config{
+		RunID:        "run-8c-default",
+		NodeID:       "consume",
+		Inputs:       []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: expectedDigest, MaterializationMode: "remote_fetch"}},
+		WorkRoot:     tmpDir,
+		OutputRoot:   tmpDir,
+		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:      []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
+	}
+}
+
 func TestRunFailsOnRemoteFetchRedirectToDisallowedHost(t *testing.T) {
 	tmpDir := t.TempDir()
 	redirectTarget := "http://disallowed.example/artifact"
@@ -461,6 +487,7 @@ func TestRunFailsOnRemoteFetchExpectedSizeMismatch(t *testing.T) {
 		NodeID:       "consume",
 		Inputs:       []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: expectedDigest, ExpectedSizeBytes: 7, MaterializationMode: "remote_fetch"}},
 		WorkRoot:     tmpDir,
+		HTTPAllowAny: true,
 		OutputRoot:   tmpDir,
 		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
 		Command:      []string{"sh", "-c", "exit 0"},
@@ -647,6 +674,39 @@ func TestRunFailsOnLocalReusePathOutsideInputsSubtree(t *testing.T) {
 		OutputRoot:            tmpDir,
 		ManifestPath:          filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
 		Command:               []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
+	}
+}
+
+func TestRunFailsWhenInputsPathIsSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	outsideDir := filepath.Join(tmpDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("mkdir outside dir: %v", err)
+	}
+	inputsPath := filepath.Join(tmpDir, "inputs")
+	if err := os.Symlink(outsideDir, inputsPath); err != nil {
+		t.Fatalf("symlink inputs path: %v", err)
+	}
+	payload := []byte("remote-input-ok")
+	sum := sha256.Sum256(payload)
+	expectedDigest := "sha256:" + hex.EncodeToString(sum[:])
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	exitCode := Run(context.Background(), Config{
+		RunID:        "run-12d",
+		NodeID:       "consume",
+		Inputs:       []InputSpec{{Name: "dataset", URI: server.URL + "/dataset", ExpectedDigest: expectedDigest, MaterializationMode: "remote_fetch"}},
+		WorkRoot:     tmpDir,
+		HTTPAllowAny: true,
+		OutputRoot:   tmpDir,
+		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:      []string{"sh", "-c", "exit 0"},
 	})
 	if exitCode != ExitMaterializeFailed {
 		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
