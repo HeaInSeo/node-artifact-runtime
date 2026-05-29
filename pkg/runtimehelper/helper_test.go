@@ -498,6 +498,68 @@ func TestRunFailsOnLocalReuseRelativePath(t *testing.T) {
 	}
 }
 
+func TestRunFailsOnLocalReuseSymlinkSourcePath(t *testing.T) {
+	tmpDir := t.TempDir()
+	nodeLocalDir := filepath.Join(tmpDir, "node-local")
+	if err := os.MkdirAll(nodeLocalDir, 0o755); err != nil {
+		t.Fatalf("mkdir node-local dir: %v", err)
+	}
+	targetPath := filepath.Join(nodeLocalDir, "target.bin")
+	payload := []byte("symlink-target")
+	if err := os.WriteFile(targetPath, payload, 0o644); err != nil {
+		t.Fatalf("write target artifact: %v", err)
+	}
+	sourcePath := filepath.Join(nodeLocalDir, "artifact-link.bin")
+	if err := os.Symlink(targetPath, sourcePath); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+	sum := sha256.Sum256(payload)
+	expectedDigest := "sha256:" + hex.EncodeToString(sum[:])
+
+	exitCode := Run(context.Background(), Config{
+		RunID:                 "run-12b",
+		NodeID:                "consume",
+		Inputs:                []InputSpec{{Name: "dataset", NodeLocalPath: sourcePath, ExpectedDigest: expectedDigest, MaterializationMode: "local_reuse"}},
+		WorkRoot:              tmpDir,
+		NodeLocalArtifactRoot: nodeLocalDir,
+		OutputRoot:            tmpDir,
+		ManifestPath:          filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:               []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
+	}
+}
+
+func TestRunFailsOnLocalReusePathOutsideInputsSubtree(t *testing.T) {
+	tmpDir := t.TempDir()
+	nodeLocalDir := filepath.Join(tmpDir, "node-local")
+	if err := os.MkdirAll(nodeLocalDir, 0o755); err != nil {
+		t.Fatalf("mkdir node-local dir: %v", err)
+	}
+	payload := []byte("outside-inputs")
+	sourcePath := filepath.Join(nodeLocalDir, "artifact.bin")
+	if err := os.WriteFile(sourcePath, payload, 0o644); err != nil {
+		t.Fatalf("write source artifact: %v", err)
+	}
+	sum := sha256.Sum256(payload)
+	expectedDigest := "sha256:" + hex.EncodeToString(sum[:])
+
+	exitCode := Run(context.Background(), Config{
+		RunID:                 "run-12c",
+		NodeID:                "consume",
+		Inputs:                []InputSpec{{Name: "dataset", NodeLocalPath: sourcePath, ExpectedDigest: expectedDigest, MaterializationMode: "local_reuse", LocalPath: "result"}},
+		WorkRoot:              tmpDir,
+		NodeLocalArtifactRoot: nodeLocalDir,
+		OutputRoot:            tmpDir,
+		ManifestPath:          filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:               []string{"sh", "-c", "exit 0"},
+	})
+	if exitCode != ExitMaterializeFailed {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitMaterializeFailed)
+	}
+}
+
 func TestParseInputSpecsFromEnv(t *testing.T) {
 	inputs := ParseInputSpecsFromEnv([]string{
 		"JUMI_INPUT_DATASET_URI=http://artifact.local/dataset",

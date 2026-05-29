@@ -579,18 +579,25 @@ func validateNodeLocalSourcePath(cfg Config, sourcePath string) error {
 	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return fmt.Errorf("node-local source path %q is outside allowed root %q", sourcePath, cleanedRoot)
 	}
+	info, err := os.Lstat(cleanedPath)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("node-local source path %q must not be a symlink", sourcePath)
+	}
 	return nil
 }
 
 func materializedInputPath(workRoot string, input InputSpec) (string, error) {
 	workRoot = effectiveWorkRoot(workRoot)
 	if strings.TrimSpace(input.LocalPath) != "" {
-		return secureMaterializedPath(workRoot, input.LocalPath)
+		return secureInputMaterializedPath(workRoot, input.LocalPath)
 	}
-	return secureMaterializedPath(workRoot, filepath.Join("inputs", strings.ToLower(safeInputName(input.Name))))
+	return secureInputMaterializedPath(workRoot, filepath.Join("inputs", strings.ToLower(safeInputName(input.Name))))
 }
 
-func secureMaterializedPath(workRoot, relativePath string) (string, error) {
+func secureInputMaterializedPath(workRoot, relativePath string) (string, error) {
 	if relativePath == "" {
 		return "", fmt.Errorf("empty materialized path")
 	}
@@ -607,6 +614,10 @@ func secureMaterializedPath(workRoot, relativePath string) (string, error) {
 	}
 	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return "", fmt.Errorf("materialized path escapes work root")
+	}
+	inputsPrefix := "inputs" + string(os.PathSeparator)
+	if rel == "inputs" || !strings.HasPrefix(rel, inputsPrefix) {
+		return "", fmt.Errorf("materialized path must stay under inputs/")
 	}
 	return candidate, nil
 }
