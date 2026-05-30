@@ -16,6 +16,7 @@ type NodeContract struct {
 	AttemptID     string           `json:"attemptId,omitempty"`
 	ContainerName string           `json:"containerName,omitempty"`
 	Paths         ContractPaths    `json:"paths"`
+	Inputs        []ContractInput  `json:"inputs,omitempty"`
 	Outputs       []ContractOutput `json:"outputs,omitempty"`
 	Runtime       RuntimePolicy    `json:"runtime,omitempty"`
 }
@@ -32,6 +33,16 @@ type ContractOutput struct {
 	Path     string `json:"path"`
 	Required bool   `json:"required,omitempty"`
 	Type     string `json:"type,omitempty"`
+}
+
+type ContractInput struct {
+	Name                string `json:"name"`
+	URI                 string `json:"uri,omitempty"`
+	ExpectedDigest      string `json:"expectedDigest,omitempty"`
+	ExpectedSizeBytes   int64  `json:"expectedSizeBytes,omitempty"`
+	MaterializationMode string `json:"materializationMode,omitempty"`
+	NodeLocalPath       string `json:"nodeLocalPath,omitempty"`
+	LocalPath           string `json:"localPath,omitempty"`
 }
 
 type RuntimePolicy struct {
@@ -77,6 +88,14 @@ func (c NodeContract) Validate() error {
 		}
 		if output.Path == "" {
 			return fmt.Errorf("outputs[%d].path is required", i)
+		}
+	}
+	for i, input := range c.Inputs {
+		if input.Name == "" {
+			return fmt.Errorf("inputs[%d].name is required", i)
+		}
+		if input.ExpectedSizeBytes < 0 {
+			return fmt.Errorf("inputs[%d].expectedSizeBytes must be >= 0", i)
 		}
 	}
 	return nil

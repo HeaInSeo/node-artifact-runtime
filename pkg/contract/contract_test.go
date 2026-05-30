@@ -20,6 +20,16 @@ func TestLoadContract(t *testing.T) {
     "outputRoot": "/out",
     "manifestPath": "/out/_meta/jumi/manifest.json"
   },
+  "inputs": [
+    {
+      "name": "dataset",
+      "uri": "http://artifact.local/dataset",
+      "expectedDigest": "sha256:abc",
+      "expectedSizeBytes": 17,
+      "materializationMode": "remote_fetch",
+      "localPath": "inputs/dataset"
+    }
+  ],
   "outputs": [
     {
       "name": "bam",
@@ -42,6 +52,9 @@ func TestLoadContract(t *testing.T) {
 	if len(contract.Outputs) != 1 {
 		t.Fatalf("outputs len = %d, want 1", len(contract.Outputs))
 	}
+	if len(contract.Inputs) != 1 || contract.Inputs[0].Name != "dataset" {
+		t.Fatalf("inputs = %#v, want dataset input", contract.Inputs)
+	}
 	if contract.Outputs[0].Path != "result.bam" {
 		t.Fatalf("output path = %q, want result.bam", contract.Outputs[0].Path)
 	}
@@ -54,6 +67,26 @@ func TestValidateContractRequiresManifestPath(t *testing.T) {
   "paths": {
     "outputRoot": "/out"
   }
+}`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want validation error")
+	}
+}
+
+func TestValidateContractRejectsNegativeInputSize(t *testing.T) {
+	_, err := Load(writeTempContract(t, `{
+  "runId": "run-1",
+  "nodeId": "bwa",
+  "paths": {
+    "outputRoot": "/out",
+    "manifestPath": "/out/_meta/jumi/manifest.json"
+  },
+  "inputs": [
+    {
+      "name": "dataset",
+      "expectedSizeBytes": -1
+    }
+  ]
 }`))
 	if err == nil {
 		t.Fatal("Load() error = nil, want validation error")

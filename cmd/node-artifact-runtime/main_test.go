@@ -18,6 +18,16 @@ func TestBuildConfigPrefersContract(t *testing.T) {
     "outputRoot": "/out",
     "manifestPath": "/out/_meta/jumi/manifest.json"
   },
+  "inputs": [
+    {
+      "name": "dataset",
+      "uri": "http://artifact.local/dataset",
+      "expectedDigest": "sha256:abc",
+      "expectedSizeBytes": 17,
+      "materializationMode": "remote_fetch",
+      "localPath": "inputs/result"
+    }
+  ],
   "outputs": [
     {
       "name": "report",
@@ -48,5 +58,8 @@ func TestBuildConfigPrefersContract(t *testing.T) {
 	}
 	if len(cfg.Outputs) != 1 || cfg.Outputs[0].Path != "report.txt" {
 		t.Fatalf("cfg.Outputs = %#v", cfg.Outputs)
+	}
+	if len(cfg.Inputs) != 1 || cfg.Inputs[0].Name != "dataset" || cfg.Inputs[0].ExpectedSizeBytes != 17 {
+		t.Fatalf("cfg.Inputs = %#v", cfg.Inputs)
 	}
 }

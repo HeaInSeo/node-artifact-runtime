@@ -111,9 +111,11 @@ func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputName
 		cfg.HTTPTimeout = httpTimeout
 		cfg.HTTPMaxRedirects = httpMaxRedirects
 		cfg.HTTPMaxInputBytes = httpMaxInputBytes
-		cfg.Inputs, err = runtimehelper.ParseInputSpecsFromEnv(os.Environ(), cfg.WorkRoot)
-		if err != nil {
-			return runtimehelper.Config{}, err
+		if len(cfg.Inputs) == 0 {
+			cfg.Inputs, err = runtimehelper.ParseInputSpecsFromEnv(os.Environ(), cfg.WorkRoot)
+			if err != nil {
+				return runtimehelper.Config{}, err
+			}
 		}
 		return cfg, nil
 	}

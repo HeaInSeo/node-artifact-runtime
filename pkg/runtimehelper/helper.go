@@ -1002,6 +1002,18 @@ func (c Config) effectiveOutputs() []OutputSpec {
 }
 
 func ConfigFromContract(c contract.NodeContract) Config {
+	inputs := make([]InputSpec, 0, len(c.Inputs))
+	for _, input := range c.Inputs {
+		inputs = append(inputs, InputSpec{
+			Name:                input.Name,
+			URI:                 input.URI,
+			ExpectedDigest:      input.ExpectedDigest,
+			ExpectedSizeBytes:   input.ExpectedSizeBytes,
+			MaterializationMode: input.MaterializationMode,
+			NodeLocalPath:       input.NodeLocalPath,
+			LocalPath:           input.LocalPath,
+		})
+	}
 	outputs := make([]OutputSpec, 0, len(c.Outputs))
 	for _, output := range c.Outputs {
 		required := output.Required
@@ -1021,6 +1033,7 @@ func ConfigFromContract(c contract.NodeContract) Config {
 		NodeID:               c.NodeID,
 		AttemptID:            c.AttemptID,
 		ContainerName:        c.ContainerName,
+		Inputs:               inputs,
 		Outputs:              outputs,
 		WorkRoot:             firstNonEmpty(c.Paths.WorkRoot, "/work"),
 		OutputRoot:           c.Paths.OutputRoot,
