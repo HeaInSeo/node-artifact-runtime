@@ -305,11 +305,28 @@ func buildArtifactRecord(cfg Config, output OutputSpec) (provenance.ArtifactReco
 		}
 		return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: stat output %s: %v", errInspectFailed, output.Name, err)
 	}
+	// Re-validate after symlink resolution: the declared path may be a symlink
+	// whose target resolves outside the output root.
+	realPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: stat output %s: %v", errInspectFailed, output.Name, err)
+	}
+	cleanRoot := filepath.Clean(cfg.OutputRoot)
+	rel, err := filepath.Rel(cleanRoot, realPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: output %s symlink escapes output root", errInvalidOutputPath, output.Name)
+	}
+	path = realPath
 	if !info.Mode().IsRegular() {
-		if info.IsDir() && !cfg.AllowDirectoryOutput {
-			return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: output %s is a directory", errUnsupportedOutputType, output.Name)
+		if info.IsDir() {
+			if !cfg.AllowDirectoryOutput {
+				return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: output %s is a directory", errUnsupportedOutputType, output.Name)
+			}
+			// Directory output allowed; downstream CAS hashing does not support
+			// directories yet and will return its own error.
+		} else {
+			return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: output %s is not a regular file", errUnsupportedOutputType, output.Name)
 		}
-		return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: output %s is not a regular file", errUnsupportedOutputType, output.Name)
 	}
 	uri := fmt.Sprintf("jumi://runs/%s/nodes/%s/outputs/%s", cfg.RunID, cfg.NodeID, output.Name)
 	if cfg.AttemptID != "" {
@@ -672,7 +689,7 @@ func validateRemoteFetchURI(cfg Config, rawURI string) error {
 		return fmt.Errorf("query string is not allowed")
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
 			return fmt.Errorf("host %q is not allowed", host)
 		}
 	}
@@ -705,6 +722,37 @@ func remoteFetchClient(cfg Config) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = timeout
 	transport.IdleConnTimeout = 30 * time.Second
+	// Re-validate the resolved IP at dial time to block DNS rebinding attacks:
+	// an attacker-controlled DNS server may return a public IP at validation
+	// time and a private IP when the actual connection is made.
+	// Hosts listed in HTTPAllowedHosts are explicitly trusted and skip the
+	// resolved-IP check (allows test servers on loopback).
+	dialer := &net.Dialer{}
+	allowedHosts := cfg.HTTPAllowedHosts
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range allowedHosts {
+			if strings.EqualFold(strings.TrimSpace(a), host) {
+				return dialer.DialContext(ctx, network, addr)
+			}
+		}
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("no addresses resolved for host %q", host)
+		}
+		for _, a := range ips {
+			if a.IP.IsLoopback() || a.IP.IsLinkLocalUnicast() || a.IP.IsLinkLocalMulticast() || a.IP.IsPrivate() {
+				return nil, fmt.Errorf("host %q resolved to disallowed address %s", host, a.IP)
+			}
+		}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+	}
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
