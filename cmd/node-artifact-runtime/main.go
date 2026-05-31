@@ -32,15 +32,6 @@ func main() {
 	}
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
 func runCommand(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	contractPath := fs.String("contract", "", "path to node contract JSON")
@@ -48,15 +39,16 @@ func runCommand(args []string) int {
 	sampleRunID := fs.String("sample-run-id", os.Getenv("JUMI_SAMPLE_RUN_ID"), "sample run identifier")
 	nodeID := fs.String("node-id", os.Getenv("JUMI_NODE_ID"), "node identifier")
 	attemptID := fs.String("attempt-id", os.Getenv("JUMI_ATTEMPT_ID"), "attempt identifier")
+	containerName := fs.String("container-name", os.Getenv("JUMI_CONTAINER_NAME"), "container name")
 	outputNames := fs.String("output-names", os.Getenv("JUMI_OUTPUT_NAMES"), "comma-separated output names")
-	workRoot := fs.String("work-root", firstNonEmpty(os.Getenv("JUMI_WORK_ROOT"), "/work"), "work root path")
-	outputRoot := fs.String("output-root", firstNonEmpty(os.Getenv("JUMI_OUTPUT_ROOT"), "/out"), "output root path")
-	manifestPath := fs.String("manifest-path", firstNonEmpty(os.Getenv("JUMI_OUTPUT_MANIFEST_PATH"), provenance.DefaultArtifactsManifestPath), "artifacts manifest path")
+	workRoot := fs.String("work-root", runtimehelper.FirstNonEmpty(os.Getenv("JUMI_WORK_ROOT"), "/work"), "work root path")
+	outputRoot := fs.String("output-root", runtimehelper.FirstNonEmpty(os.Getenv("JUMI_OUTPUT_ROOT"), "/out"), "output root path")
+	manifestPath := fs.String("manifest-path", runtimehelper.FirstNonEmpty(os.Getenv("JUMI_OUTPUT_MANIFEST_PATH"), provenance.DefaultArtifactsManifestPath), "artifacts manifest path")
 	terminationLogPath := fs.String("termination-log-path", "/dev/termination-log", "termination log path")
 	if err := fs.Parse(args); err != nil {
 		return runtimehelper.ExitInvalidConfig
 	}
-	cfg, err := buildConfig(*contractPath, *runID, *sampleRunID, *nodeID, *attemptID, *outputNames, *workRoot, *outputRoot, *manifestPath, *terminationLogPath)
+	cfg, err := buildConfig(*contractPath, *runID, *sampleRunID, *nodeID, *attemptID, *containerName, *outputNames, *workRoot, *outputRoot, *manifestPath, *terminationLogPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return runtimehelper.ExitInvalidConfig
@@ -78,16 +70,17 @@ func inspectCommand(args []string) int {
 	sampleRunID := fs.String("sample-run-id", os.Getenv("JUMI_SAMPLE_RUN_ID"), "sample run identifier")
 	nodeID := fs.String("node-id", os.Getenv("JUMI_NODE_ID"), "node identifier")
 	attemptID := fs.String("attempt-id", os.Getenv("JUMI_ATTEMPT_ID"), "attempt identifier")
+	containerName := fs.String("container-name", os.Getenv("JUMI_CONTAINER_NAME"), "container name")
 	outputNames := fs.String("output-names", os.Getenv("JUMI_OUTPUT_NAMES"), "comma-separated output names")
-	workRoot := fs.String("work-root", firstNonEmpty(os.Getenv("JUMI_WORK_ROOT"), "/work"), "work root path")
-	outputRoot := fs.String("output-root", firstNonEmpty(os.Getenv("JUMI_OUTPUT_ROOT"), "/out"), "output root path")
-	manifestPath := fs.String("manifest-path", firstNonEmpty(os.Getenv("JUMI_OUTPUT_MANIFEST_PATH"), provenance.DefaultArtifactsManifestPath), "artifacts manifest path")
+	workRoot := fs.String("work-root", runtimehelper.FirstNonEmpty(os.Getenv("JUMI_WORK_ROOT"), "/work"), "work root path")
+	outputRoot := fs.String("output-root", runtimehelper.FirstNonEmpty(os.Getenv("JUMI_OUTPUT_ROOT"), "/out"), "output root path")
+	manifestPath := fs.String("manifest-path", runtimehelper.FirstNonEmpty(os.Getenv("JUMI_OUTPUT_MANIFEST_PATH"), provenance.DefaultArtifactsManifestPath), "artifacts manifest path")
 	terminationLogPath := fs.String("termination-log-path", "/dev/termination-log", "termination log path")
 	commandExitCode := fs.Int("command-exit-code", parsePositiveInt(os.Getenv("JUMI_COMMAND_EXIT_CODE")), "exit code of the prior user command (used with inspectOnSuccessOnly)")
 	if err := fs.Parse(args); err != nil {
 		return runtimehelper.ExitInvalidConfig
 	}
-	cfg, err := buildConfig(*contractPath, *runID, *sampleRunID, *nodeID, *attemptID, *outputNames, *workRoot, *outputRoot, *manifestPath, *terminationLogPath)
+	cfg, err := buildConfig(*contractPath, *runID, *sampleRunID, *nodeID, *attemptID, *containerName, *outputNames, *workRoot, *outputRoot, *manifestPath, *terminationLogPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return runtimehelper.ExitInvalidConfig
@@ -96,7 +89,7 @@ func inspectCommand(args []string) int {
 	return runtimehelper.Inspect(cfg)
 }
 
-func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputNames, workRoot, outputRoot, manifestPath, terminationLogPath string) (runtimehelper.Config, error) {
+func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, containerName, outputNames, workRoot, outputRoot, manifestPath, terminationLogPath string) (runtimehelper.Config, error) {
 	nodeLocalArtifactRoot := os.Getenv("JUMI_NODE_LOCAL_ARTIFACT_ROOT")
 	httpAllowedHosts := parseCommaSeparated(os.Getenv("JUMI_ALLOWED_HTTP_SOURCE_HOSTS"))
 	httpAllowAny := parseBoolEnv(os.Getenv("JUMI_ALLOW_ANY_HTTP_SOURCE"))
@@ -119,6 +112,9 @@ func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputName
 		cfg.HTTPTimeout = httpTimeout
 		cfg.HTTPMaxRedirects = httpMaxRedirects
 		cfg.HTTPMaxInputBytes = httpMaxInputBytes
+		if containerName != "" {
+			cfg.ContainerName = containerName
+		}
 		if len(cfg.Inputs) == 0 {
 			cfg.Inputs, err = runtimehelper.ParseInputSpecsFromEnv(os.Environ(), cfg.WorkRoot)
 			if err != nil {
@@ -136,6 +132,7 @@ func buildConfig(contractPath, runID, sampleRunID, nodeID, attemptID, outputName
 		SampleRunID:           sampleRunID,
 		NodeID:                nodeID,
 		AttemptID:             attemptID,
+		ContainerName:         containerName,
 		Inputs:                inputs,
 		OutputNames:           runtimehelper.ParseOutputNames(outputNames),
 		WorkRoot:              workRoot,

@@ -424,7 +424,7 @@ func buildArtifactRecord(cfg Config, output OutputSpec) (provenance.ArtifactReco
 		LogicalURI:        logicalURI,
 		Digest:            digest,
 		SizeBytes:         size,
-		Type:              firstNonEmpty(output.Type, "file"),
+		Type:              FirstNonEmpty(output.Type, "file"),
 		ProducerAttemptID: cfg.AttemptID,
 	}
 	if location != nil {
@@ -910,11 +910,18 @@ func safeInputName(name string) string {
 	if out == "" {
 		return "input"
 	}
+	const maxLen = 64
+	if len(out) > maxLen {
+		out = strings.TrimRight(out[:maxLen], "-")
+		if out == "" {
+			return "input"
+		}
+	}
 	return out
 }
 
 func effectiveWorkRoot(workRoot string) string {
-	return firstNonEmpty(workRoot, "/work")
+	return FirstNonEmpty(workRoot, "/work")
 }
 
 func forwardSignal(cmd *exec.Cmd, sig os.Signal) {
@@ -934,6 +941,13 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
+	}
+	// Validate that the manifest directory doesn't traverse a symlink to prevent
+	// an attacker from redirecting writes outside the expected directory.
+	if resolved, err := filepath.EvalSymlinks(dir); err != nil {
+		return fmt.Errorf("manifest dir symlink check: %w", err)
+	} else if resolved != filepath.Clean(dir) {
+		return fmt.Errorf("manifest dir %q resolves to %q via symlink; refusing write", dir, resolved)
 	}
 	tmp, err := os.CreateTemp(dir, ".manifest-*.tmp")
 	if err != nil {
@@ -1114,7 +1128,7 @@ func ConfigFromContract(c contract.NodeContract) Config {
 			Name:     output.Name,
 			Path:     output.Path,
 			Required: required,
-			Type:     firstNonEmpty(output.Type, "file"),
+			Type:     FirstNonEmpty(output.Type, "file"),
 		})
 	}
 	return Config{
@@ -1125,7 +1139,7 @@ func ConfigFromContract(c contract.NodeContract) Config {
 		ContainerName:        c.ContainerName,
 		Inputs:               inputs,
 		Outputs:              outputs,
-		WorkRoot:             firstNonEmpty(c.Paths.WorkRoot, "/work"),
+		WorkRoot:             FirstNonEmpty(c.Paths.WorkRoot, "/work"),
 		OutputRoot:           c.Paths.OutputRoot,
 		ManifestPath:         c.Paths.ManifestPath,
 		AllowDirectoryOutput: c.Runtime.AllowDirectoryOutput,
@@ -1161,7 +1175,7 @@ func ParseInputSpecsFromEnv(env []string, workRoot string) ([]InputSpec, error) 
 			base := strings.TrimSuffix(strings.TrimPrefix(key, "JUMI_INPUT_"), "_NODE_LOCAL_PATH")
 			p := ensurePartial(byBase, base)
 			p.nodeLocalPath = value
-		case strings.HasSuffix(key, "_LOCAL_PATH"):
+		case strings.HasSuffix(key, "_LOCAL_PATH") && !strings.HasSuffix(key, "_NODE_LOCAL_PATH"):
 			base := strings.TrimSuffix(strings.TrimPrefix(key, "JUMI_INPUT_"), "_LOCAL_PATH")
 			p := ensurePartial(byBase, base)
 			p.localPath = value
@@ -1196,7 +1210,7 @@ func ParseInputSpecsFromEnv(env []string, workRoot string) ([]InputSpec, error) 
 			ExpectedSizeBytes:   expectedSizeBytes,
 			MaterializationMode: p.materializationMode,
 			NodeLocalPath:       p.nodeLocalPath,
-			LocalPath:           firstNonEmpty(p.localPath, filepath.Join("inputs", strings.ToLower(base))),
+			LocalPath:           FirstNonEmpty(p.localPath, filepath.Join("inputs", strings.ToLower(base))),
 		})
 	}
 	return inputs, nil
@@ -1222,7 +1236,8 @@ func (c Config) commandEnv() ([]string, error) {
 	return env, nil
 }
 
-func firstNonEmpty(values ...string) string {
+// FirstNonEmpty returns the first non-empty string among values, or "" if all are empty.
+func FirstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if value != "" {
 			return value
@@ -1239,7 +1254,9 @@ func writeTerminationSummary(cfg Config, summary TerminationSummary) {
 	if err != nil {
 		return
 	}
-	_ = writeTerminationLog(cfg.TerminationLogPath, append(raw, '\n'))
+	if err := writeTerminationLog(cfg.TerminationLogPath, append(raw, '\n')); err != nil {
+		fmt.Fprintf(stderrOrDefault(cfg.Stderr), "warning: failed to write termination log: %v\n", err)
+	}
 }
 
 func writeTerminationManifest(cfg Config) {
@@ -1256,7 +1273,9 @@ func writeTerminationManifest(cfg Config) {
 	if raw[len(raw)-1] != '\n' {
 		raw = append(raw, '\n')
 	}
-	_ = writeTerminationLog(cfg.TerminationLogPath, raw)
+	if err := writeTerminationLog(cfg.TerminationLogPath, raw); err != nil {
+		fmt.Fprintf(stderrOrDefault(cfg.Stderr), "warning: failed to write termination manifest: %v\n", err)
+	}
 }
 
 func writeTerminationLog(path string, data []byte) error {

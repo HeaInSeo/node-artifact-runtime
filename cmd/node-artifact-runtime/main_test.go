@@ -40,7 +40,7 @@ func TestBuildConfigPrefersContract(t *testing.T) {
 	if err := os.WriteFile(contractPath, []byte(content), 0o600); err != nil {
 		t.Fatalf("write contract: %v", err)
 	}
-	cfg, err := buildConfig(contractPath, "run-from-flag", "", "node-from-flag", "attempt-from-flag", "legacy.txt", "/legacy-work", "/legacy-out", "/legacy-manifest", "/dev/termination-log")
+	cfg, err := buildConfig(contractPath, "run-from-flag", "", "node-from-flag", "attempt-from-flag", "", "legacy.txt", "/legacy-work", "/legacy-out", "/legacy-manifest", "/dev/termination-log")
 	if err != nil {
 		t.Fatalf("buildConfig() error = %v", err)
 	}
