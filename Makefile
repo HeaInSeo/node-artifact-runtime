@@ -18,8 +18,9 @@ PKGS_ALL      := ./...
 PKGS_CORE     := ./cmd/... ./pkg/...
 PKGS_COVER    := ./cmd/... ./pkg/...
 PKGS_SECURITY := ./cmd/... ./pkg/...
+COVERAGE_THRESHOLD := 70
 
-.PHONY: test coverage fmt vet build lint lint-depguard lint-security vuln vuln-all golangci-lint govulncheck
+.PHONY: test coverage coverage-check fmt vet build lint lint-depguard lint-security vuln vuln-all golangci-lint govulncheck
 
 test:
 	@mkdir -p "$(GOCACHE_DIR)" "$(GOTMPDIR_DIR)"
@@ -29,6 +30,15 @@ coverage:
 	@mkdir -p "$(REPORT_DIR)" "$(GOCACHE_DIR)" "$(GOTMPDIR_DIR)"
 	$(GOENV) go test $(PKGS_COVER) -coverprofile="$(REPORT_DIR)/cover.out" -covermode=atomic
 	go tool cover -func="$(REPORT_DIR)/cover.out" | tee "$(REPORT_DIR)/coverage.txt"
+
+coverage-check: coverage
+	@TOTAL=$$(go tool cover -func="$(REPORT_DIR)/cover.out" | awk '/^total:/{gsub(/%/,""); print int($$3)}'); \
+	echo "[nan] total coverage: $${TOTAL}%"; \
+	if [ "$${TOTAL}" -lt "$(COVERAGE_THRESHOLD)" ]; then \
+		echo "FAIL: coverage $${TOTAL}% is below threshold $(COVERAGE_THRESHOLD)%"; exit 1; \
+	else \
+		echo "OK: coverage $${TOTAL}% >= $(COVERAGE_THRESHOLD)%"; \
+	fi
 
 fmt:
 	go fmt $(PKGS_ALL)

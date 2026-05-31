@@ -1255,7 +1255,7 @@ func writeTerminationSummary(cfg Config, summary TerminationSummary) {
 		return
 	}
 	if err := writeTerminationLog(cfg.TerminationLogPath, append(raw, '\n')); err != nil {
-		fmt.Fprintf(stderrOrDefault(cfg.Stderr), "warning: failed to write termination log: %v\n", err)
+		_, _ = fmt.Fprintf(stderrOrDefault(cfg.Stderr), "warning: failed to write termination log: %v\n", err)
 	}
 }
 
@@ -1274,7 +1274,7 @@ func writeTerminationManifest(cfg Config) {
 		raw = append(raw, '\n')
 	}
 	if err := writeTerminationLog(cfg.TerminationLogPath, raw); err != nil {
-		fmt.Fprintf(stderrOrDefault(cfg.Stderr), "warning: failed to write termination manifest: %v\n", err)
+		_, _ = fmt.Fprintf(stderrOrDefault(cfg.Stderr), "warning: failed to write termination manifest: %v\n", err)
 	}
 }
 
