@@ -178,11 +178,11 @@ func TestRunPromotesOutputToExistingCASArtifactAndReusesLocation(t *testing.T) {
 	sum := sha256.Sum256(payload)
 	hexDigest := hex.EncodeToString(sum[:])
 	casDir := filepath.Join(nodeLocalRoot, "cas", "sha256")
-	if err := os.MkdirAll(casDir, 0o755); err != nil {
+	if err := os.MkdirAll(casDir, 0o750); err != nil {
 		t.Fatalf("mkdir cas dir: %v", err)
 	}
 	existingPath := filepath.Join(casDir, hexDigest)
-	if err := os.WriteFile(existingPath, payload, 0o644); err != nil {
+	if err := os.WriteFile(existingPath, payload, 0o600); err != nil {
 		t.Fatalf("write existing CAS artifact: %v", err)
 	}
 	infoBefore, err := os.Stat(existingPath)
@@ -287,7 +287,7 @@ func TestInspectRejectsEscapingOutputPath(t *testing.T) {
 func TestInspectRejectsDirectoryOutput(t *testing.T) {
 	tmpDir := t.TempDir()
 	dirPath := filepath.Join(tmpDir, "dir-output")
-	if err := os.MkdirAll(dirPath, 0o755); err != nil {
+	if err := os.MkdirAll(dirPath, 0o750); err != nil {
 		t.Fatalf("mkdir dir output: %v", err)
 	}
 	exitCode := Inspect(Config{
@@ -417,7 +417,7 @@ func TestRunFailsOnRemoteFetchCredentialBearingUserinfo(t *testing.T) {
 	exitCode := Run(context.Background(), Config{
 		RunID:        "run-8b-userinfo",
 		NodeID:       "consume",
-		Inputs:       []InputSpec{{Name: "dataset", URI: "http://user:pass@example.com/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
+		Inputs:       []InputSpec{{Name: "dataset", URI: "http://user:pass@example.com/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}}, //nolint:gosec // intentional: testing credential-bearing URI rejection
 		WorkRoot:     tmpDir,
 		OutputRoot:   tmpDir,
 		ManifestPath: filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
@@ -597,12 +597,12 @@ func TestRemoteFetchClientHasDefaultTimeout(t *testing.T) {
 func TestRunMaterializesLocalReuseInputAndInjectsLocalPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	nodeLocalDir := filepath.Join(tmpDir, "node-local")
-	if err := os.MkdirAll(nodeLocalDir, 0o755); err != nil {
+	if err := os.MkdirAll(nodeLocalDir, 0o750); err != nil {
 		t.Fatalf("mkdir node-local dir: %v", err)
 	}
 	payload := []byte("local-reuse-ok")
 	sourcePath := filepath.Join(nodeLocalDir, "artifact.bin")
-	if err := os.WriteFile(sourcePath, payload, 0o644); err != nil {
+	if err := os.WriteFile(sourcePath, payload, 0o600); err != nil {
 		t.Fatalf("write source artifact: %v", err)
 	}
 	sum := sha256.Sum256(payload)
@@ -638,11 +638,11 @@ func TestRunMaterializesLocalReuseInputAndInjectsLocalPath(t *testing.T) {
 func TestRunFailsOnLocalReuseDigestMismatch(t *testing.T) {
 	tmpDir := t.TempDir()
 	nodeLocalDir := filepath.Join(tmpDir, "node-local")
-	if err := os.MkdirAll(nodeLocalDir, 0o755); err != nil {
+	if err := os.MkdirAll(nodeLocalDir, 0o750); err != nil {
 		t.Fatalf("mkdir node-local dir: %v", err)
 	}
 	sourcePath := filepath.Join(nodeLocalDir, "artifact.bin")
-	if err := os.WriteFile(sourcePath, []byte("wrong-digest"), 0o644); err != nil {
+	if err := os.WriteFile(sourcePath, []byte("wrong-digest"), 0o600); err != nil {
 		t.Fatalf("write source artifact: %v", err)
 	}
 
@@ -667,12 +667,12 @@ func TestRunFailsOnLocalReuseDigestMismatch(t *testing.T) {
 func TestRunFailsOnLocalReuseExpectedSizeMismatch(t *testing.T) {
 	tmpDir := t.TempDir()
 	nodeLocalDir := filepath.Join(tmpDir, "node-local")
-	if err := os.MkdirAll(nodeLocalDir, 0o755); err != nil {
+	if err := os.MkdirAll(nodeLocalDir, 0o750); err != nil {
 		t.Fatalf("mkdir node-local dir: %v", err)
 	}
 	payload := []byte("local-size")
 	sourcePath := filepath.Join(nodeLocalDir, "artifact.bin")
-	if err := os.WriteFile(sourcePath, payload, 0o644); err != nil {
+	if err := os.WriteFile(sourcePath, payload, 0o600); err != nil {
 		t.Fatalf("write source artifact: %v", err)
 	}
 	sum := sha256.Sum256(payload)
@@ -696,12 +696,12 @@ func TestRunFailsOnLocalReuseExpectedSizeMismatch(t *testing.T) {
 func TestRunFailsOnLocalReusePathOutsideAllowedRoot(t *testing.T) {
 	tmpDir := t.TempDir()
 	nodeLocalDir := filepath.Join(tmpDir, "node-local")
-	if err := os.MkdirAll(nodeLocalDir, 0o755); err != nil {
+	if err := os.MkdirAll(nodeLocalDir, 0o750); err != nil {
 		t.Fatalf("mkdir node-local dir: %v", err)
 	}
 	sourcePath := filepath.Join(tmpDir, "outside.bin")
 	payload := []byte("outside-root")
-	if err := os.WriteFile(sourcePath, payload, 0o644); err != nil {
+	if err := os.WriteFile(sourcePath, payload, 0o600); err != nil {
 		t.Fatalf("write source artifact: %v", err)
 	}
 	sum := sha256.Sum256(payload)
@@ -725,7 +725,7 @@ func TestRunFailsOnLocalReusePathOutsideAllowedRoot(t *testing.T) {
 func TestRunFailsOnLocalReuseRelativePath(t *testing.T) {
 	tmpDir := t.TempDir()
 	nodeLocalDir := filepath.Join(tmpDir, "node-local")
-	if err := os.MkdirAll(nodeLocalDir, 0o755); err != nil {
+	if err := os.MkdirAll(nodeLocalDir, 0o750); err != nil {
 		t.Fatalf("mkdir node-local dir: %v", err)
 	}
 
@@ -747,12 +747,12 @@ func TestRunFailsOnLocalReuseRelativePath(t *testing.T) {
 func TestRunFailsOnLocalReuseSymlinkSourcePath(t *testing.T) {
 	tmpDir := t.TempDir()
 	nodeLocalDir := filepath.Join(tmpDir, "node-local")
-	if err := os.MkdirAll(nodeLocalDir, 0o755); err != nil {
+	if err := os.MkdirAll(nodeLocalDir, 0o750); err != nil {
 		t.Fatalf("mkdir node-local dir: %v", err)
 	}
 	targetPath := filepath.Join(nodeLocalDir, "target.bin")
 	payload := []byte("symlink-target")
-	if err := os.WriteFile(targetPath, payload, 0o644); err != nil {
+	if err := os.WriteFile(targetPath, payload, 0o600); err != nil {
 		t.Fatalf("write target artifact: %v", err)
 	}
 	sourcePath := filepath.Join(nodeLocalDir, "artifact-link.bin")
@@ -780,7 +780,7 @@ func TestRunFailsOnLocalReuseSymlinkSourcePath(t *testing.T) {
 func TestRunFailsOnLocalReuseResolvedRootEscape(t *testing.T) {
 	tmpDir := t.TempDir()
 	realRoot := filepath.Join(tmpDir, "real-root")
-	if err := os.MkdirAll(realRoot, 0o755); err != nil {
+	if err := os.MkdirAll(realRoot, 0o750); err != nil {
 		t.Fatalf("mkdir real root: %v", err)
 	}
 	symlinkRoot := filepath.Join(tmpDir, "node-local")
@@ -788,12 +788,12 @@ func TestRunFailsOnLocalReuseResolvedRootEscape(t *testing.T) {
 		t.Fatalf("symlink root: %v", err)
 	}
 	outsideDir := filepath.Join(tmpDir, "outside")
-	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+	if err := os.MkdirAll(outsideDir, 0o750); err != nil {
 		t.Fatalf("mkdir outside: %v", err)
 	}
 	sourcePath := filepath.Join(outsideDir, "artifact.bin")
 	payload := []byte("outside-real-root")
-	if err := os.WriteFile(sourcePath, payload, 0o644); err != nil {
+	if err := os.WriteFile(sourcePath, payload, 0o600); err != nil {
 		t.Fatalf("write outside artifact: %v", err)
 	}
 	sum := sha256.Sum256(payload)
@@ -817,12 +817,12 @@ func TestRunFailsOnLocalReuseResolvedRootEscape(t *testing.T) {
 func TestRunFailsOnLocalReusePathOutsideInputsSubtree(t *testing.T) {
 	tmpDir := t.TempDir()
 	nodeLocalDir := filepath.Join(tmpDir, "node-local")
-	if err := os.MkdirAll(nodeLocalDir, 0o755); err != nil {
+	if err := os.MkdirAll(nodeLocalDir, 0o750); err != nil {
 		t.Fatalf("mkdir node-local dir: %v", err)
 	}
 	payload := []byte("outside-inputs")
 	sourcePath := filepath.Join(nodeLocalDir, "artifact.bin")
-	if err := os.WriteFile(sourcePath, payload, 0o644); err != nil {
+	if err := os.WriteFile(sourcePath, payload, 0o600); err != nil {
 		t.Fatalf("write source artifact: %v", err)
 	}
 	sum := sha256.Sum256(payload)
@@ -846,7 +846,7 @@ func TestRunFailsOnLocalReusePathOutsideInputsSubtree(t *testing.T) {
 func TestRunFailsWhenInputsPathIsSymlink(t *testing.T) {
 	tmpDir := t.TempDir()
 	outsideDir := filepath.Join(tmpDir, "outside")
-	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+	if err := os.MkdirAll(outsideDir, 0o750); err != nil {
 		t.Fatalf("mkdir outside dir: %v", err)
 	}
 	inputsPath := filepath.Join(tmpDir, "inputs")

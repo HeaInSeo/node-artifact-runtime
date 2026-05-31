@@ -1,0 +1,50 @@
+version: "2"
+
+run:
+  allow-parallel-runners: true
+
+linters:
+  default: none
+  enable:
+    - depguard
+    - errcheck
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - revive
+    - staticcheck
+    - unused
+  settings:
+    depguard:
+      rules:
+        no_k8s:
+          files:
+            - "cmd/*.go"
+            - "cmd/**/*.go"
+            - "pkg/*.go"
+            - "pkg/**/*.go"
+          deny:
+            - pkg: "k8s.io/**"
+              desc: "nan is a container-side runtime tool and must stay Kubernetes-independent"
+            - pkg: "sigs.k8s.io/**"
+              desc: "nan is a container-side runtime tool and must stay Kubernetes-independent"
+    gosec:
+      excludes:
+        # nan intentionally executes user-supplied commands (the node's workload binary).
+        # The command is assembled from the node contract, not from raw user input.
+        - G204
+        # Contract and manifest paths come from operator-controlled flags/env, not user input.
+        # The code performs filepath.Clean + containment checks before use.
+        - G304
+    revive:
+      rules:
+        - name: comment-spacings
+        - name: import-shadowing
+  exclusions:
+    generated: lax
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

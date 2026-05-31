@@ -470,10 +470,10 @@ func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpe
 	if err != nil {
 		return fmt.Errorf("%w: input %s target path: %v", errMaterializeFailed, input.Name, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o750); err != nil {
 		return fmt.Errorf("%w: mkdir target dir for input %s: %v", errMaterializeFailed, input.Name, err)
 	}
-	if err := os.MkdirAll(filepath.Join(workRoot, ".jumi-fetch"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(workRoot, ".jumi-fetch"), 0o750); err != nil {
 		return fmt.Errorf("%w: mkdir fetch temp dir for input %s: %v", errMaterializeFailed, input.Name, err)
 	}
 	tmpFile, err := os.CreateTemp(filepath.Join(workRoot, ".jumi-fetch"), safeInputName(input.Name)+".*.part")
@@ -481,7 +481,7 @@ func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpe
 		return fmt.Errorf("%w: create temp file for input %s: %v", errMaterializeFailed, input.Name, err)
 	}
 	tmpName := tmpFile.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, input.URI, nil)
 	if err != nil {
@@ -493,7 +493,7 @@ func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpe
 		_ = tmpFile.Close()
 		return fmt.Errorf("%w: fetch input %s: %v", errMaterializeFailed, input.Name, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		_ = tmpFile.Close()
 		return fmt.Errorf("%w: fetch input %s returned status %d", errMaterializeFailed, input.Name, resp.StatusCode)
@@ -554,10 +554,10 @@ func materializeLocalReuseInput(_ context.Context, cfg Config, input InputSpec) 
 	if err != nil {
 		return fmt.Errorf("%w: input %s target path: %v", errMaterializeFailed, input.Name, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o750); err != nil {
 		return fmt.Errorf("%w: mkdir target dir for input %s: %v", errMaterializeFailed, input.Name, err)
 	}
-	if err := os.MkdirAll(filepath.Join(workRoot, ".jumi-fetch"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(workRoot, ".jumi-fetch"), 0o750); err != nil {
 		return fmt.Errorf("%w: mkdir materialize temp dir for input %s: %v", errMaterializeFailed, input.Name, err)
 	}
 	tmpFile, err := os.CreateTemp(filepath.Join(workRoot, ".jumi-fetch"), safeInputName(input.Name)+".*.part")
@@ -565,14 +565,14 @@ func materializeLocalReuseInput(_ context.Context, cfg Config, input InputSpec) 
 		return fmt.Errorf("%w: create temp file for input %s: %v", errMaterializeFailed, input.Name, err)
 	}
 	tmpName := tmpFile.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 
 	sourceFile, err := os.Open(input.NodeLocalPath)
 	if err != nil {
 		_ = tmpFile.Close()
 		return fmt.Errorf("%w: open node-local input %s: %v", errMaterializeFailed, input.Name, err)
 	}
-	defer sourceFile.Close()
+	defer func() { _ = sourceFile.Close() }()
 
 	hash := sha256.New()
 	written, err := io.Copy(io.MultiWriter(tmpFile, hash), sourceFile)
@@ -829,7 +829,7 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
@@ -873,10 +873,10 @@ func promoteOutputToNodeLocalCAS(cfg Config, output OutputSpec, sourcePath strin
 	root := filepath.Clean(cfg.NodeLocalArtifactRoot)
 	casDir := filepath.Join(root, "cas", "sha256")
 	tmpDir := filepath.Join(root, "tmp")
-	if err := os.MkdirAll(casDir, 0o755); err != nil {
+	if err := os.MkdirAll(casDir, 0o750); err != nil {
 		return nil, "", 0, fmt.Errorf("%w: mkdir CAS dir for output %s: %v", errInspectFailed, output.Name, err)
 	}
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
 		return nil, "", 0, fmt.Errorf("%w: mkdir tmp dir for output %s: %v", errInspectFailed, output.Name, err)
 	}
 	tmpFile, err := os.CreateTemp(tmpDir, fmt.Sprintf("%s-%s-%s-%s-", cfg.RunID, cfg.NodeID, cfg.AttemptID, output.Name))
@@ -884,7 +884,7 @@ func promoteOutputToNodeLocalCAS(cfg Config, output OutputSpec, sourcePath strin
 		return nil, "", 0, fmt.Errorf("%w: create temp CAS file for output %s: %v", errInspectFailed, output.Name, err)
 	}
 	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	sourceFile, err := os.Open(sourcePath)
 	if err != nil {
@@ -945,27 +945,6 @@ func verifyExistingCASArtifact(path, expectedDigest string) (bool, error) {
 		return false, fmt.Errorf("%w: existing CAS artifact digest mismatch: got %s want %s", errInspectFailed, actual, expectedDigest)
 	}
 	return true, nil
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	if err := out.Sync(); err != nil {
-		_ = out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 func sha256Digest(path string) (string, error) {
@@ -1172,5 +1151,5 @@ func writeTerminationLog(path string, data []byte) error {
 	if path == "" {
 		return nil
 	}
-	return os.WriteFile(path, data, 0o600)
+	return os.WriteFile(path, data, 0o600) //nolint:gosec // path is operator-controlled (/dev/termination-log default or explicit flag)
 }
