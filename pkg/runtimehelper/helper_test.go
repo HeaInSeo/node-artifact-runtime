@@ -937,3 +937,51 @@ func TestConfigValidateRejectsNegativeExpectedSize(t *testing.T) {
 		t.Fatal("expected negative expected size to be rejected")
 	}
 }
+
+func TestInspectSkipsOnCommandFailureWhenInspectOnSuccessOnly(t *testing.T) {
+	tmpDir := t.TempDir()
+	terminationPath := filepath.Join(tmpDir, "termination.log")
+	exitCode := Inspect(Config{
+		RunID:                "run-inspect-skip",
+		NodeID:               "produce",
+		Outputs:              []OutputSpec{{Name: "report", Path: "report", Required: true, Type: "file"}},
+		OutputRoot:           tmpDir,
+		ManifestPath:         filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		TerminationLogPath:   terminationPath,
+		InspectOnSuccessOnly: true,
+		CommandExitCode:      42,
+	})
+	if exitCode != 42 {
+		t.Fatalf("Inspect() exitCode = %d, want 42", exitCode)
+	}
+	raw, err := os.ReadFile(terminationPath)
+	if err != nil {
+		t.Fatalf("read termination log: %v", err)
+	}
+	var summary TerminationSummary
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		t.Fatalf("unmarshal termination summary: %v", err)
+	}
+	if summary.Status != "command_failed" {
+		t.Fatalf("termination status = %q, want \"command_failed\"", summary.Status)
+	}
+}
+
+func TestInspectProceedsWhenInspectOnSuccessOnlyAndCommandSucceeded(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "report"), []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exitCode := Inspect(Config{
+		RunID:                "run-inspect-proceed",
+		NodeID:               "produce",
+		Outputs:              []OutputSpec{{Name: "report", Path: "report", Required: true, Type: "file"}},
+		OutputRoot:           tmpDir,
+		ManifestPath:         filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		InspectOnSuccessOnly: true,
+		CommandExitCode:      0,
+	})
+	if exitCode != ExitSuccess {
+		t.Fatalf("Inspect() exitCode = %d, want %d", exitCode, ExitSuccess)
+	}
+}

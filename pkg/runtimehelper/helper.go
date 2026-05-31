@@ -109,9 +109,13 @@ type Config struct {
 	ManifestPath          string
 	TerminationLogPath    string
 	AllowDirectoryOutput  bool
-	Command               []string
-	Stdout                io.Writer
-	Stderr                io.Writer
+	InspectOnSuccessOnly  bool
+	// CommandExitCode holds the exit code of the user command when Inspect is
+	// called standalone (not via Run). Used with InspectOnSuccessOnly.
+	CommandExitCode int
+	Command         []string
+	Stdout          io.Writer
+	Stderr          io.Writer
 }
 
 func (c Config) Validate() error {
@@ -218,6 +222,17 @@ func Inspect(cfg Config) int {
 			Message:   err.Error(),
 		})
 		return ExitInvalidConfig
+	}
+	if cfg.InspectOnSuccessOnly && cfg.CommandExitCode != 0 {
+		writeTerminationSummary(cfg, TerminationSummary{
+			Status:    "command_failed",
+			ExitCode:  cfg.CommandExitCode,
+			RunID:     cfg.RunID,
+			NodeID:    cfg.NodeID,
+			AttemptID: cfg.AttemptID,
+			Message:   fmt.Sprintf("inspect skipped: command exited %d", cfg.CommandExitCode),
+		})
+		return cfg.CommandExitCode
 	}
 	if err := EmitArtifacts(cfg); err != nil {
 		_, _ = fmt.Fprintln(stderrOrDefault(cfg.Stderr), err)
@@ -1074,6 +1089,7 @@ func ConfigFromContract(c contract.NodeContract) Config {
 		OutputRoot:           c.Paths.OutputRoot,
 		ManifestPath:         c.Paths.ManifestPath,
 		AllowDirectoryOutput: c.Runtime.AllowDirectoryOutput,
+		InspectOnSuccessOnly: c.Runtime.InspectOnSuccessOnly,
 	}
 }
 

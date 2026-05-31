@@ -77,6 +77,7 @@ func inspectCommand(args []string) int {
 	outputRoot := fs.String("output-root", firstNonEmpty(os.Getenv("JUMI_OUTPUT_ROOT"), "/out"), "output root path")
 	manifestPath := fs.String("manifest-path", firstNonEmpty(os.Getenv("JUMI_OUTPUT_MANIFEST_PATH"), provenance.DefaultArtifactsManifestPath), "artifacts manifest path")
 	terminationLogPath := fs.String("termination-log-path", "/dev/termination-log", "termination log path")
+	commandExitCode := fs.Int("command-exit-code", parsePositiveInt(os.Getenv("JUMI_COMMAND_EXIT_CODE")), "exit code of the prior user command (used with inspectOnSuccessOnly)")
 	if err := fs.Parse(args); err != nil {
 		return runtimehelper.ExitInvalidConfig
 	}
@@ -85,6 +86,7 @@ func inspectCommand(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return runtimehelper.ExitInvalidConfig
 	}
+	cfg.CommandExitCode = *commandExitCode
 	return runtimehelper.Inspect(cfg)
 }
 
