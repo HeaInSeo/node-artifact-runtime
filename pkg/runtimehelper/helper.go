@@ -446,7 +446,11 @@ func executeCommand(ctx context.Context, cfg Config) error {
 	cmd.Stdout = stdoutOrDefault(cfg.Stdout)
 	cmd.Stderr = stderrOrDefault(cfg.Stderr)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = cfg.commandEnv()
+	cmdEnv, err := cfg.commandEnv()
+	if err != nil {
+		return err
+	}
+	cmd.Env = cmdEnv
 
 	if err := cmd.Start(); err != nil {
 		return err
@@ -466,7 +470,7 @@ func executeCommand(ctx context.Context, cfg Config) error {
 		}
 	}()
 
-	err := cmd.Wait()
+	err = cmd.Wait()
 	close(stopCh)
 	signal.Stop(sigCh)
 	return err
@@ -719,7 +723,11 @@ func remoteFetchClient(cfg Config) *http.Client {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	baseTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		baseTransport = &http.Transport{}
+	}
+	transport := baseTransport.Clone()
 	transport.ResponseHeaderTimeout = timeout
 	transport.IdleConnTimeout = 30 * time.Second
 	// Re-validate the resolved IP at dial time to block DNS rebinding attacks:
@@ -1044,8 +1052,8 @@ func ConfigFromContract(c contract.NodeContract) Config {
 	outputs := make([]OutputSpec, 0, len(c.Outputs))
 	for _, output := range c.Outputs {
 		required := output.Required
-		if !output.Required && c.Runtime.FailOnMissingRequiredOutput && output.Type == "" {
-			required = false
+		if !output.Required && c.Runtime.FailOnMissingRequiredOutput {
+			required = true
 		}
 		outputs = append(outputs, OutputSpec{
 			Name:     output.Name,
@@ -1145,17 +1153,17 @@ func ensurePartial(partials map[string]*partialInputSpec, base string) *partialI
 	return partials[base]
 }
 
-func (c Config) commandEnv() []string {
+func (c Config) commandEnv() ([]string, error) {
 	env := append([]string{}, os.Environ()...)
 	for _, input := range c.Inputs {
 		localPath, err := materializedInputPath(effectiveWorkRoot(c.WorkRoot), input)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("env for input %s: %w", input.Name, err)
 		}
 		keyBase := strings.ToUpper(strings.ReplaceAll(safeInputName(input.Name), "-", "_"))
 		env = append(env, "JUMI_INPUT_"+keyBase+"_LOCAL_PATH="+localPath)
 	}
-	return env
+	return env, nil
 }
 
 func firstNonEmpty(values ...string) string {
