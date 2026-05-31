@@ -388,13 +388,19 @@ func buildArtifactRecord(cfg Config, output OutputSpec) (provenance.ArtifactReco
 		size     int64
 		location *provenance.NodeLocalLocation
 	)
+	// Re-resolve symlinks immediately before opening to shrink the TOCTOU window.
+	// If the resolved path changed since the earlier check, a symlink was swapped
+	// between validation and use; reject to prevent escape.
+	if recheckPath, rerr := filepath.EvalSymlinks(path); rerr != nil || recheckPath != path {
+		return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: output %s path changed between validation and open (possible TOCTOU)", errInvalidOutputPath, output.Name)
+	}
 	if strings.TrimSpace(cfg.NodeLocalArtifactRoot) != "" {
 		location, digest, size, err = promoteOutputToNodeLocalCAS(cfg, output, path)
 		if err != nil {
 			return provenance.ArtifactRecord{}, false, err
 		}
 	} else {
-		// #nosec G304 -- path is normalized and must resolve under the container output root.
+		// #nosec G304 -- path is validated above and resolves under the container output root.
 		f, err := os.Open(path)
 		if err != nil {
 			return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: open output %s: %v", errInspectFailed, output.Name, err)
