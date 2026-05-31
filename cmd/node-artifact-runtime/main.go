@@ -62,6 +62,12 @@ func runCommand(args []string) int {
 		return runtimehelper.ExitInvalidConfig
 	}
 	cfg.Command = fs.Args()
+	runTimeout, err := parsePositiveDurationEnv("JUMI_RUN_TIMEOUT")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return runtimehelper.ExitInvalidConfig
+	}
+	cfg.RunTimeout = runTimeout
 	return runtimehelper.Run(context.Background(), cfg)
 }
 

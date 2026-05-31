@@ -48,6 +48,7 @@ const (
 	ExitMaterializeFailed     = 69
 	ExitInspectFailed         = 70
 	ExitManifestWriteFailed   = 74
+	ExitTimeout               = 75
 )
 
 type OutputSpec struct {
@@ -113,9 +114,12 @@ type Config struct {
 	// CommandExitCode holds the exit code of the user command when Inspect is
 	// called standalone (not via Run). Used with InspectOnSuccessOnly.
 	CommandExitCode int
-	Command         []string
-	Stdout          io.Writer
-	Stderr          io.Writer
+	// RunTimeout is a wall-clock limit for the entire Run lifecycle
+	// (materialize + execute + inspect). Zero means no timeout.
+	RunTimeout time.Duration
+	Command    []string
+	Stdout     io.Writer
+	Stderr     io.Writer
 }
 
 func (c Config) Validate() error {
@@ -166,7 +170,25 @@ func Run(ctx context.Context, cfg Config) int {
 		return ExitInvalidCommand
 	}
 
+	if cfg.RunTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cfg.RunTimeout)
+		defer cancel()
+	}
+
 	if err := MaterializeInputs(ctx, cfg); err != nil {
+		if ctx.Err() != nil {
+			msg := fmt.Sprintf("run timed out after %s", cfg.RunTimeout)
+			writeTerminationSummary(cfg, TerminationSummary{
+				Status:    "timeout",
+				ExitCode:  ExitTimeout,
+				RunID:     cfg.RunID,
+				NodeID:    cfg.NodeID,
+				AttemptID: cfg.AttemptID,
+				Message:   msg,
+			})
+			return ExitTimeout
+		}
 		_, _ = fmt.Fprintln(stderrOrDefault(cfg.Stderr), err)
 		writeTerminationSummary(cfg, TerminationSummary{
 			Status:    "materialization_failed",
@@ -180,6 +202,18 @@ func Run(ctx context.Context, cfg Config) int {
 	}
 
 	if err := executeCommand(ctx, cfg); err != nil {
+		if ctx.Err() != nil {
+			msg := fmt.Sprintf("run timed out after %s", cfg.RunTimeout)
+			writeTerminationSummary(cfg, TerminationSummary{
+				Status:    "timeout",
+				ExitCode:  ExitTimeout,
+				RunID:     cfg.RunID,
+				NodeID:    cfg.NodeID,
+				AttemptID: cfg.AttemptID,
+				Message:   msg,
+			})
+			return ExitTimeout
+		}
 		code := exitCode(err)
 		writeTerminationSummary(cfg, TerminationSummary{
 			Status:    "command_failed",

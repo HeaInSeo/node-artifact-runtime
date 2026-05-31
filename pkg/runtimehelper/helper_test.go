@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/HeaInSeo/node-artifact-runtime/pkg/provenance"
 )
@@ -935,6 +936,35 @@ func TestConfigValidateRejectsNegativeExpectedSize(t *testing.T) {
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected negative expected size to be rejected")
+	}
+}
+
+func TestRunTimesOutAndWritesTimeoutSummary(t *testing.T) {
+	tmpDir := t.TempDir()
+	terminationPath := filepath.Join(tmpDir, "termination.log")
+	exitCode := Run(context.Background(), Config{
+		RunID:              "run-timeout",
+		NodeID:             "produce",
+		Outputs:            []OutputSpec{{Name: "report", Path: "report", Required: false, Type: "file"}},
+		OutputRoot:         tmpDir,
+		ManifestPath:       filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		TerminationLogPath: terminationPath,
+		RunTimeout:         50 * time.Millisecond,
+		Command:            []string{"sh", "-c", "sleep 60"},
+	})
+	if exitCode != ExitTimeout {
+		t.Fatalf("Run() exitCode = %d, want %d (ExitTimeout)", exitCode, ExitTimeout)
+	}
+	raw, err := os.ReadFile(terminationPath)
+	if err != nil {
+		t.Fatalf("read termination log: %v", err)
+	}
+	var summary TerminationSummary
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		t.Fatalf("unmarshal termination summary: %v", err)
+	}
+	if summary.Status != "timeout" {
+		t.Fatalf("termination status = %q, want \"timeout\"", summary.Status)
 	}
 }
 
