@@ -745,6 +745,9 @@ func validateRemoteFetchURI(cfg Config, rawURI string) error {
 		return fmt.Errorf("missing host")
 	}
 	if parsed.RawQuery != "" {
+		if looksLikeSignedURLQuery(parsed.RawQuery) {
+			return fmt.Errorf("signed URL query string is not allowed; use runtime-only credentialRef flow")
+		}
 		return fmt.Errorf("query string is not allowed")
 	}
 	if ip := net.ParseIP(host); ip != nil {
@@ -767,6 +770,24 @@ func validateRemoteFetchURI(cfg Config, rawURI string) error {
 		return fmt.Errorf("http source allowlist is required")
 	}
 	return nil
+}
+
+func looksLikeSignedURLQuery(rawQuery string) bool {
+	rawQuery = strings.ToLower(rawQuery)
+	for _, marker := range []string{
+		"x-amz-signature",
+		"x-amz-credential",
+		"x-goog-signature",
+		"x-goog-credential",
+		"x-ms-signature",
+		"signature=",
+		"expires=",
+	} {
+		if strings.Contains(rawQuery, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func remoteFetchClient(cfg Config) *http.Client {

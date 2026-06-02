@@ -445,6 +445,16 @@ func TestRunFailsOnRemoteFetchWithAnyQuery(t *testing.T) {
 	}
 }
 
+func TestValidateRemoteFetchURIRejectsSignedURLQuery(t *testing.T) {
+	err := validateRemoteFetchURI(Config{HTTPAllowAny: true}, "https://artifact-source.local/dataset?X-Amz-Signature=abc&X-Amz-Credential=issuer")
+	if err == nil {
+		t.Fatal("expected signed URL query to be rejected")
+	}
+	if !strings.Contains(err.Error(), "signed URL query string") {
+		t.Fatalf("error = %q, want signed URL query string", err)
+	}
+}
+
 func TestRunFailsOnRemoteFetchLoopbackHost(t *testing.T) {
 	tmpDir := t.TempDir()
 	exitCode := Run(context.Background(), Config{
@@ -633,6 +643,27 @@ func TestRunMaterializesLocalReuseInputAndInjectsLocalPath(t *testing.T) {
 	}
 	if string(raw) != string(payload) {
 		t.Fatalf("materialized input = %q, want %q", string(raw), string(payload))
+	}
+	sourceInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatalf("stat source artifact: %v", err)
+	}
+	localInfo, err := os.Stat(localInputPath)
+	if err != nil {
+		t.Fatalf("stat materialized input: %v", err)
+	}
+	if os.SameFile(sourceInfo, localInfo) {
+		t.Fatal("local_reuse materialized input must be a copy, not the source file")
+	}
+	if err := os.WriteFile(localInputPath, []byte("consumer mutation"), 0o600); err != nil {
+		t.Fatalf("mutate materialized input: %v", err)
+	}
+	sourceRaw, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read source artifact after materialized input mutation: %v", err)
+	}
+	if string(sourceRaw) != string(payload) {
+		t.Fatalf("source artifact mutated through local_reuse input: got %q want %q", string(sourceRaw), string(payload))
 	}
 }
 
