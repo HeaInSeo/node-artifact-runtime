@@ -68,6 +68,7 @@ the migration. Code and build definitions will be moved here incrementally.
 Key docs:
 
 - `docs/NAN_RUNTIME_SHIM_DESIGN.md`
+- `docs/NAN_PID1_SHUTDOWN_PLAN.md`
 - `docs/NAN_INPUT_MATERIALIZATION_DRAFT.md`
 - `docs/ARCHITECTURE.md`
 - `docs/MIGRATION_FROM_JUMI.md`

@@ -93,6 +93,21 @@ func TestValidateContractRejectsNegativeInputSize(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsUnsupportedSchemaVersion(t *testing.T) {
+	_, err := Load(writeTempContract(t, `{
+  "schemaVersion": "nan.nodeContract.v2",
+  "runId": "run-1",
+  "nodeId": "bwa",
+  "paths": {
+    "outputRoot": "/out",
+    "manifestPath": "/out/_meta/jumi/manifest.json"
+  }
+}`))
+	if err == nil {
+		t.Fatal("Load() error = nil, want unsupported schemaVersion error")
+	}
+}
+
 func writeTempContract(t *testing.T, content string) string {
 	t.Helper()
 	tmpDir := t.TempDir()

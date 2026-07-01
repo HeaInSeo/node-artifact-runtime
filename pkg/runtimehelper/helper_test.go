@@ -10,8 +10,12 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -997,6 +1001,94 @@ func TestRunTimesOutAndWritesTimeoutSummary(t *testing.T) {
 	if summary.Status != "timeout" {
 		t.Fatalf("termination status = %q, want \"timeout\"", summary.Status)
 	}
+}
+
+func TestRunTimeoutEscalatesToKillWhenChildIgnoresTerm(t *testing.T) {
+	tmpDir := t.TempDir()
+	manifestPath := filepath.Join(tmpDir, "_meta", "artifacts.manifest.json")
+	start := time.Now()
+	exitCode := Run(context.Background(), Config{
+		RunID:               "run-timeout-kill",
+		NodeID:              "produce",
+		Outputs:             []OutputSpec{{Name: "report", Path: "report", Required: false, Type: "file"}},
+		OutputRoot:          tmpDir,
+		ManifestPath:        manifestPath,
+		TerminationLogPath:  filepath.Join(tmpDir, "termination.log"),
+		RunTimeout:          50 * time.Millisecond,
+		ShutdownGracePeriod: 50 * time.Millisecond,
+		Command:             []string{"sh", "-c", "trap '' TERM; sleep 60"},
+	})
+	if exitCode != ExitTimeout {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitTimeout)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Run() took %s, want quick SIGKILL escalation", elapsed)
+	}
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("manifest exists after timeout, stat err = %v", err)
+	}
+}
+
+func TestRunTimeoutKillsGrandchildProcessGroup(t *testing.T) {
+	tmpDir := t.TempDir()
+	pidPath := filepath.Join(tmpDir, "grandchild.pid")
+	exitCode := Run(context.Background(), Config{
+		RunID:               "run-timeout-grandchild",
+		NodeID:              "produce",
+		OutputRoot:          tmpDir,
+		ManifestPath:        filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		RunTimeout:          50 * time.Millisecond,
+		ShutdownGracePeriod: 50 * time.Millisecond,
+		Command: []string{"sh", "-c", fmt.Sprintf(
+			"sleep 60 & echo $! > %q; wait",
+			pidPath,
+		)},
+	})
+	if exitCode != ExitTimeout {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitTimeout)
+	}
+	raw, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("read grandchild pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("parse pid %q: %v", string(raw), err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); err != nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("grandchild pid %d still exists after timeout", pid)
+}
+
+func TestReapReparentedChildrenAfterOrphanExit(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("child subreaper behavior is Linux-specific")
+	}
+	if err := enableChildSubreaper(); err != nil {
+		t.Fatalf("enableChildSubreaper() error = %v", err)
+	}
+	cmd := exec.Command("sh", "-c", "sleep 0.05 &")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start shell: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait shell: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	reaped := 0
+	for time.Now().Before(deadline) {
+		reaped += reapReparentedChildren()
+		if reaped > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("expected to reap at least one reparented child")
 }
 
 func TestInspectSkipsOnCommandFailureWhenInspectOnSuccessOnly(t *testing.T) {

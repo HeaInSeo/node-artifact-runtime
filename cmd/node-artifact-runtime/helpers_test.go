@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -256,6 +257,37 @@ func TestBuildConfig_NoContract_ValidHTTPTimeout(t *testing.T) {
 	}
 	if cfg.HTTPTimeout != 30*time.Second {
 		t.Fatalf("HTTPTimeout = %v, want 30s", cfg.HTTPTimeout)
+	}
+}
+
+func TestRunCommandRejectsInvalidShutdownGracePeriod(t *testing.T) {
+	t.Setenv("JUMI_SHUTDOWN_GRACE_PERIOD", "notaduration")
+	exitCode := runCommand([]string{
+		"--run-id", "r",
+		"--node-id", "n",
+		"--output-root", t.TempDir(),
+		"--manifest-path", "/tmp/manifest.json",
+		"--",
+		"true",
+	})
+	if exitCode != 2 {
+		t.Fatalf("runCommand() exitCode = %d, want 2", exitCode)
+	}
+}
+
+func TestRunCommandParsesShutdownGracePeriodFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	exitCode := runCommand([]string{
+		"--run-id", "r",
+		"--node-id", "n",
+		"--output-root", tmpDir,
+		"--manifest-path", filepath.Join(tmpDir, "manifest.json"),
+		"--shutdown-grace-period", "100ms",
+		"--",
+		"true",
+	})
+	if exitCode != 0 {
+		t.Fatalf("runCommand() exitCode = %d, want 0", exitCode)
 	}
 }
 

@@ -63,6 +63,9 @@ func Load(path string) (NodeContract, error) {
 	if c.SchemaVersion == "" {
 		c.SchemaVersion = NodeContractSchemaVersion
 	}
+	if c.SchemaVersion != NodeContractSchemaVersion {
+		return NodeContract{}, fmt.Errorf("unsupported schemaVersion %q", c.SchemaVersion)
+	}
 	if err := c.Validate(); err != nil {
 		return NodeContract{}, err
 	}

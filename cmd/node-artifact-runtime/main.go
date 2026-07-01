@@ -45,6 +45,11 @@ func runCommand(args []string) int {
 	outputRoot := fs.String("output-root", runtimehelper.FirstNonEmpty(os.Getenv("JUMI_OUTPUT_ROOT"), "/out"), "output root path")
 	manifestPath := fs.String("manifest-path", runtimehelper.FirstNonEmpty(os.Getenv("JUMI_OUTPUT_MANIFEST_PATH"), provenance.DefaultArtifactsManifestPath), "artifacts manifest path")
 	terminationLogPath := fs.String("termination-log-path", "/dev/termination-log", "termination log path")
+	if _, err := parsePositiveDurationEnv("JUMI_SHUTDOWN_GRACE_PERIOD"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return runtimehelper.ExitInvalidConfig
+	}
+	shutdownGracePeriod := fs.Duration("shutdown-grace-period", parseDurationEnvOrDefault("JUMI_SHUTDOWN_GRACE_PERIOD", runtimehelper.DefaultShutdownGracePeriod), "grace period before SIGKILL after shutdown signal")
 	if err := fs.Parse(args); err != nil {
 		return runtimehelper.ExitInvalidConfig
 	}
@@ -54,6 +59,7 @@ func runCommand(args []string) int {
 		return runtimehelper.ExitInvalidConfig
 	}
 	cfg.Command = fs.Args()
+	cfg.ShutdownGracePeriod = *shutdownGracePeriod
 	runTimeout, err := parsePositiveDurationEnv("JUMI_RUN_TIMEOUT")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -76,6 +82,11 @@ func inspectCommand(args []string) int {
 	outputRoot := fs.String("output-root", runtimehelper.FirstNonEmpty(os.Getenv("JUMI_OUTPUT_ROOT"), "/out"), "output root path")
 	manifestPath := fs.String("manifest-path", runtimehelper.FirstNonEmpty(os.Getenv("JUMI_OUTPUT_MANIFEST_PATH"), provenance.DefaultArtifactsManifestPath), "artifacts manifest path")
 	terminationLogPath := fs.String("termination-log-path", "/dev/termination-log", "termination log path")
+	if _, err := parsePositiveDurationEnv("JUMI_SHUTDOWN_GRACE_PERIOD"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return runtimehelper.ExitInvalidConfig
+	}
+	shutdownGracePeriod := fs.Duration("shutdown-grace-period", parseDurationEnvOrDefault("JUMI_SHUTDOWN_GRACE_PERIOD", runtimehelper.DefaultShutdownGracePeriod), "grace period before SIGKILL after shutdown signal")
 	commandExitCode := fs.Int("command-exit-code", parsePositiveInt(os.Getenv("JUMI_COMMAND_EXIT_CODE")), "exit code of the prior user command (used with inspectOnSuccessOnly)")
 	if err := fs.Parse(args); err != nil {
 		return runtimehelper.ExitInvalidConfig
@@ -86,6 +97,7 @@ func inspectCommand(args []string) int {
 		return runtimehelper.ExitInvalidConfig
 	}
 	cfg.CommandExitCode = *commandExitCode
+	cfg.ShutdownGracePeriod = *shutdownGracePeriod
 	return runtimehelper.Inspect(cfg)
 }
 
@@ -206,4 +218,12 @@ func parsePositiveDurationEnv(key string) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid %s: must be > 0", key)
 	}
 	return value, nil
+}
+
+func parseDurationEnvOrDefault(key string, fallback time.Duration) time.Duration {
+	value, err := parsePositiveDurationEnv(key)
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
 }
