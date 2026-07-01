@@ -67,6 +67,29 @@ JUMI가 AH RegisterArtifact 호출
 
 `nan`은 사용자의 명령을 대신 해석하지 않는다. JUMI가 정한 argv를 그대로 실행한다.
 
+### 2.1 reserved commandlets
+
+`nan`의 top-level commandlet 이름은 예약어다.
+
+```text
+run
+inspect
+version
+```
+
+사용자 command 이름이 위 예약어와 충돌하면 direct commandlet 형태로 실행하지 않는다.
+
+```text
+nan inspect ...
+```
+
+위 명령은 사용자 command `inspect`가 아니라 `nan inspect` commandlet이다.
+충돌하는 command는 반드시 `run --` 뒤에 둔다.
+
+```text
+nan run -- inspect ...
+```
+
 ## 3. 책임 경계
 
 nan이 해야 하는 것:

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1063,6 +1064,177 @@ func TestRunTimeoutKillsGrandchildProcessGroup(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("grandchild pid %d still exists after timeout", pid)
+}
+
+func TestRunFailsWhenBackgroundGrandchildOutlivesMainCommand(t *testing.T) {
+	tmpDir := t.TempDir()
+	pidPath := filepath.Join(tmpDir, "grandchild.pid")
+	manifestPath := filepath.Join(tmpDir, "_meta", "artifacts.manifest.json")
+	terminationPath := filepath.Join(tmpDir, "termination.log")
+	exitCode := Run(context.Background(), Config{
+		RunID:               "run-background-grandchild",
+		NodeID:              "produce",
+		Outputs:             []OutputSpec{{Name: "report", Path: "report", Required: true, Type: "file"}},
+		OutputRoot:          tmpDir,
+		ManifestPath:        manifestPath,
+		TerminationLogPath:  terminationPath,
+		ShutdownGracePeriod: 50 * time.Millisecond,
+		Command: []string{"sh", "-c", fmt.Sprintf(
+			"printf early > %q; sleep 60 & echo $! > %q; exit 0",
+			filepath.Join(tmpDir, "report"),
+			pidPath,
+		)},
+	})
+	if exitCode == ExitSuccess {
+		t.Fatalf("Run() exitCode = %d, want failure for remaining process group", exitCode)
+	}
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("manifest exists after process group residue, stat err = %v", err)
+	}
+	raw, err := os.ReadFile(terminationPath)
+	if err != nil {
+		t.Fatalf("read termination log: %v", err)
+	}
+	var summary TerminationSummary
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		t.Fatalf("unmarshal termination summary: %v", err)
+	}
+	if summary.Status != "process_group_not_clean" {
+		t.Fatalf("termination status = %q, want process_group_not_clean", summary.Status)
+	}
+	pidRaw, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("read grandchild pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidRaw)))
+	if err != nil {
+		t.Fatalf("parse pid %q: %v", string(pidRaw), err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); err != nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("grandchild pid %d still exists after process group residue cleanup", pid)
+}
+
+func TestRunExternalSIGTERMSuppressesManifest(t *testing.T) {
+	tmpDir := t.TempDir()
+	manifestPath := filepath.Join(tmpDir, "_meta", "artifacts.manifest.json")
+	terminationPath := filepath.Join(tmpDir, "termination.log")
+	pidPath := filepath.Join(tmpDir, "grandchild.pid")
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimeHelperSignalSubprocess")
+	cmd.Env = append(os.Environ(),
+		"NAN_HELPER_SIGNAL_SUBPROCESS=1",
+		"NAN_HELPER_SIGNAL_OUTPUT_ROOT="+tmpDir,
+		"NAN_HELPER_SIGNAL_MANIFEST_PATH="+manifestPath,
+		"NAN_HELPER_SIGNAL_TERMINATION_PATH="+terminationPath,
+		"NAN_HELPER_SIGNAL_PID_PATH="+pidPath,
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper subprocess: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(pidPath); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Stat(pidPath); err != nil {
+		t.Fatalf("grandchild pid was not written before deadline: %v", err)
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("send SIGTERM to helper subprocess: %v", err)
+	}
+	err := cmd.Wait()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("helper subprocess Wait() error = %v, want ExitError", err)
+	}
+	if exitErr.ExitCode() != signalExitCode(syscall.SIGTERM) {
+		t.Fatalf("helper subprocess exit = %d, want %d", exitErr.ExitCode(), signalExitCode(syscall.SIGTERM))
+	}
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("manifest exists after external SIGTERM, stat err = %v", err)
+	}
+	raw, err := os.ReadFile(terminationPath)
+	if err != nil {
+		t.Fatalf("read termination log: %v", err)
+	}
+	var summary TerminationSummary
+	if err := json.Unmarshal(raw, &summary); err != nil {
+		t.Fatalf("unmarshal termination summary: %v", err)
+	}
+	if summary.Status != "interrupted" && summary.Status != "killed" {
+		t.Fatalf("termination status = %q, want interrupted or killed", summary.Status)
+	}
+}
+
+func TestRunRejectsDirectoryOutputEvenWhenAllowDirectoryOutputSet(t *testing.T) {
+	tmpDir := t.TempDir()
+	manifestPath := filepath.Join(tmpDir, "_meta", "artifacts.manifest.json")
+	reportDir := filepath.Join(tmpDir, "report")
+	exitCode := Run(context.Background(), Config{
+		RunID:                "run-directory-output",
+		NodeID:               "produce",
+		Outputs:              []OutputSpec{{Name: "report", Path: "report", Required: true, Type: "directory"}},
+		OutputRoot:           tmpDir,
+		ManifestPath:         manifestPath,
+		AllowDirectoryOutput: true,
+		Command:              []string{"sh", "-c", "mkdir -p " + reportDir},
+	})
+	if exitCode != ExitUnsupportedOutputType {
+		t.Fatalf("Run() exitCode = %d, want %d", exitCode, ExitUnsupportedOutputType)
+	}
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("manifest exists after unsupported directory output, stat err = %v", err)
+	}
+}
+
+func TestRuntimeHelperSignalSubprocess(t *testing.T) {
+	if os.Getenv("NAN_HELPER_SIGNAL_SUBPROCESS") != "1" {
+		return
+	}
+	outputRoot := os.Getenv("NAN_HELPER_SIGNAL_OUTPUT_ROOT")
+	manifestPath := os.Getenv("NAN_HELPER_SIGNAL_MANIFEST_PATH")
+	terminationPath := os.Getenv("NAN_HELPER_SIGNAL_TERMINATION_PATH")
+	pidPath := os.Getenv("NAN_HELPER_SIGNAL_PID_PATH")
+	code := Run(context.Background(), Config{
+		RunID:               "run-external-sigterm",
+		NodeID:              "produce",
+		Outputs:             []OutputSpec{{Name: "report", Path: "report", Required: false, Type: "file"}},
+		OutputRoot:          outputRoot,
+		ManifestPath:        manifestPath,
+		TerminationLogPath:  terminationPath,
+		ShutdownGracePeriod: 50 * time.Millisecond,
+		Command: []string{"sh", "-c", fmt.Sprintf(
+			"sleep 60 & echo $! > %q; wait",
+			pidPath,
+		)},
+	})
+	os.Exit(code)
+}
+
+func TestAtomicWriteFileContextHonorsCanceledContextBeforeCreate(t *testing.T) {
+	tmpDir := t.TempDir()
+	manifestPath := filepath.Join(tmpDir, "_meta", "artifacts.manifest.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := atomicWriteFileContext(ctx, manifestPath, []byte("{}\n"), 0o600); !errors.Is(err, context.Canceled) {
+		t.Fatalf("atomicWriteFileContext() error = %v, want context.Canceled", err)
+	}
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("manifest exists after canceled atomic write, stat err = %v", err)
+	}
 }
 
 func TestReapReparentedChildrenAfterOrphanExit(t *testing.T) {

@@ -13,13 +13,10 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/HeaInSeo/node-artifact-runtime/pkg/contract"
@@ -36,6 +33,7 @@ var (
 	errInspectFailed         = errors.New("inspect failed")
 	errMaterializeFailed     = errors.New("materialize failed")
 	errManifestWriteFailed   = errors.New("manifest write failed")
+	errProcessGroupNotClean  = errors.New("process group not clean")
 	errSubreaperSetupFailed  = errors.New("subreaper setup failed")
 )
 
@@ -57,6 +55,8 @@ const DefaultShutdownGracePeriod = 25 * time.Second
 
 const (
 	linuxPRSetChildSubreaper = 36
+	processGroupPollInterval = 10 * time.Millisecond
+	processGroupKillWait     = 2 * time.Second
 )
 
 type OutputSpec struct {
@@ -133,15 +133,6 @@ type Config struct {
 	Stderr              io.Writer
 }
 
-type commandResult struct {
-	Err         error
-	ExitCode    int
-	TimedOut    bool
-	Interrupted bool
-	Killed      bool
-	Signal      syscall.Signal
-}
-
 func (c Config) Validate() error {
 	if c.RunID == "" {
 		return fmt.Errorf("%w: runID is required", errInvalidConfig)
@@ -190,24 +181,13 @@ func Run(ctx context.Context, cfg Config) int {
 		return ExitInvalidCommand
 	}
 
-	if cfg.RunTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, cfg.RunTimeout)
-		defer cancel()
-	}
+	lifecycle := newRunLifecycle(ctx, cfg)
+	defer lifecycle.stop()
+	ctx = lifecycle.ctx
 
 	if err := MaterializeInputs(ctx, cfg); err != nil {
 		if ctx.Err() != nil {
-			msg := fmt.Sprintf("run timed out after %s", cfg.RunTimeout)
-			writeTerminationSummary(cfg, TerminationSummary{
-				Status:    "timeout",
-				ExitCode:  ExitTimeout,
-				RunID:     cfg.RunID,
-				NodeID:    cfg.NodeID,
-				AttemptID: cfg.AttemptID,
-				Message:   msg,
-			})
-			return ExitTimeout
+			return writeLifecycleCancellationSummary(cfg, lifecycle)
 		}
 		_, _ = fmt.Fprintln(stderrOrDefault(cfg.Stderr), err)
 		writeTerminationSummary(cfg, TerminationSummary{
@@ -221,7 +201,7 @@ func Run(ctx context.Context, cfg Config) int {
 		return ExitMaterializeFailed
 	}
 
-	result := executeCommand(ctx, cfg)
+	result := executeCommand(ctx, cfg, lifecycle)
 	if result.TimedOut {
 		msg := fmt.Sprintf("run timed out after %s", cfg.RunTimeout)
 		writeTerminationSummary(cfg, TerminationSummary{
@@ -251,9 +231,13 @@ func Run(ctx context.Context, cfg Config) int {
 		return result.ExitCode
 	}
 	if result.Err != nil {
+		status := "command_failed"
+		if result.NotClean {
+			status = "process_group_not_clean"
+		}
 		code := result.ExitCode
 		writeTerminationSummary(cfg, TerminationSummary{
-			Status:    "command_failed",
+			Status:    status,
 			ExitCode:  code,
 			RunID:     cfg.RunID,
 			NodeID:    cfg.NodeID,
@@ -265,16 +249,7 @@ func Run(ctx context.Context, cfg Config) int {
 
 	if err := EmitArtifactsContext(ctx, cfg); err != nil {
 		if ctx.Err() != nil {
-			msg := fmt.Sprintf("run timed out after %s", cfg.RunTimeout)
-			writeTerminationSummary(cfg, TerminationSummary{
-				Status:    "timeout",
-				ExitCode:  ExitTimeout,
-				RunID:     cfg.RunID,
-				NodeID:    cfg.NodeID,
-				AttemptID: cfg.AttemptID,
-				Message:   msg,
-			})
-			return ExitTimeout
+			return writeLifecycleCancellationSummary(cfg, lifecycle)
 		}
 		_, _ = fmt.Fprintln(stderrOrDefault(cfg.Stderr), err)
 		code := classifyHelperError(err)
@@ -291,6 +266,31 @@ func Run(ctx context.Context, cfg Config) int {
 	}
 	writeTerminationManifest(cfg)
 	return ExitSuccess
+}
+
+func writeLifecycleCancellationSummary(cfg Config, lifecycle *runLifecycle) int {
+	if sigv, ok := lifecycle.interruptedSignal(); ok {
+		msg := fmt.Sprintf("run interrupted by %s", sigv)
+		writeTerminationSummary(cfg, TerminationSummary{
+			Status:    "interrupted",
+			ExitCode:  signalExitCode(sigv),
+			RunID:     cfg.RunID,
+			NodeID:    cfg.NodeID,
+			AttemptID: cfg.AttemptID,
+			Message:   msg,
+		})
+		return signalExitCode(sigv)
+	}
+	msg := fmt.Sprintf("run timed out after %s", cfg.RunTimeout)
+	writeTerminationSummary(cfg, TerminationSummary{
+		Status:    "timeout",
+		ExitCode:  ExitTimeout,
+		RunID:     cfg.RunID,
+		NodeID:    cfg.NodeID,
+		AttemptID: cfg.AttemptID,
+		Message:   msg,
+	})
+	return ExitTimeout
 }
 
 func Inspect(cfg Config) int {
@@ -395,7 +395,7 @@ func EmitArtifactsContext(ctx context.Context, cfg Config) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := atomicWriteFile(cfg.ManifestPath, append(raw, '\n'), 0o600); err != nil {
+	if err := atomicWriteFileContext(ctx, cfg.ManifestPath, append(raw, '\n'), 0o600); err != nil {
 		return fmt.Errorf("%w: write manifest: %v", errManifestWriteFailed, err)
 	}
 	return nil
@@ -434,11 +434,7 @@ func buildArtifactRecordContext(ctx context.Context, cfg Config, output OutputSp
 	path = realPath
 	if !info.Mode().IsRegular() {
 		if info.IsDir() {
-			if !cfg.AllowDirectoryOutput {
-				return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: output %s is a directory", errUnsupportedOutputType, output.Name)
-			}
-			// Directory output allowed; downstream CAS hashing does not support
-			// directories yet and will return its own error.
+			return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: output %s is a directory; directory artifacts are not supported", errUnsupportedOutputType, output.Name)
 		} else {
 			return provenance.ArtifactRecord{}, false, fmt.Errorf("%w: output %s is not a regular file", errUnsupportedOutputType, output.Name)
 		}
@@ -559,63 +555,6 @@ func stderrOrDefault(w io.Writer) io.Writer {
 		return w
 	}
 	return os.Stderr
-}
-
-func executeCommand(ctx context.Context, cfg Config) commandResult {
-	if err := enableChildSubreaper(); err != nil {
-		return commandResult{
-			Err:      fmt.Errorf("%w: %v", errSubreaperSetupFailed, err),
-			ExitCode: ExitGenericError,
-		}
-	}
-
-	// #nosec G204 -- runtimehelper intentionally executes the node command selected by the run spec.
-	cmd := exec.Command(cfg.Command[0], cfg.Command[1:]...)
-	cmd.Stdout = stdoutOrDefault(cfg.Stdout)
-	cmd.Stderr = stderrOrDefault(cfg.Stderr)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmdEnv, err := cfg.commandEnv()
-	if err != nil {
-		return commandResult{Err: err, ExitCode: ExitGenericError}
-	}
-	cmd.Env = cmdEnv
-
-	if err := cmd.Start(); err != nil {
-		return commandResult{Err: err, ExitCode: ExitGenericError}
-	}
-
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
-
-	sigCh := make(chan os.Signal, 4)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT)
-	defer signal.Stop(sigCh)
-
-	select {
-	case err := <-waitCh:
-		_ = reapReparentedChildren()
-		return commandResult{Err: err, ExitCode: exitCode(err)}
-	case <-ctx.Done():
-		err, killed := terminateProcessGroupAndWait(cmd, syscall.SIGTERM, effectiveShutdownGracePeriod(cfg.ShutdownGracePeriod), waitCh)
-		_ = reapReparentedChildren()
-		return commandResult{Err: err, ExitCode: ExitTimeout, TimedOut: true, Killed: killed}
-	case sig := <-sigCh:
-		sigv, ok := sig.(syscall.Signal)
-		if !ok {
-			sigv = syscall.SIGTERM
-		}
-		err, killed := terminateProcessGroupAndWait(cmd, sigv, effectiveShutdownGracePeriod(cfg.ShutdownGracePeriod), waitCh)
-		_ = reapReparentedChildren()
-		return commandResult{
-			Err:         err,
-			ExitCode:    signalExitCode(sigv),
-			Interrupted: true,
-			Killed:      killed,
-			Signal:      sigv,
-		}
-	}
 }
 
 func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpec) error {
@@ -1032,71 +971,14 @@ func effectiveWorkRoot(workRoot string) string {
 	return FirstNonEmpty(workRoot, "/work")
 }
 
-func forwardSignal(cmd *exec.Cmd, sig os.Signal) {
-	if cmd == nil || cmd.Process == nil {
-		return
-	}
-	if sigv, ok := sig.(syscall.Signal); ok {
-		if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil && pgid > 0 {
-			_ = syscall.Kill(-pgid, sigv)
-			return
-		}
-	}
-	_ = cmd.Process.Signal(sig)
-}
-
-func terminateProcessGroupAndWait(cmd *exec.Cmd, sig syscall.Signal, grace time.Duration, waitCh <-chan error) (error, bool) {
-	forwardSignal(cmd, sig)
-	timer := time.NewTimer(grace)
-	defer timer.Stop()
-	select {
-	case err := <-waitCh:
-		return err, false
-	case <-timer.C:
-		forwardSignal(cmd, syscall.SIGKILL)
-		err := <-waitCh
-		return err, true
-	}
-}
-
-func effectiveShutdownGracePeriod(value time.Duration) time.Duration {
-	if value > 0 {
-		return value
-	}
-	return DefaultShutdownGracePeriod
-}
-
-func signalExitCode(sig syscall.Signal) int {
-	return 128 + int(sig)
-}
-
-func enableChildSubreaper() error {
-	if runtime.GOOS != "linux" {
-		return nil
-	}
-	_, _, errno := syscall.Syscall6(syscall.SYS_PRCTL, uintptr(linuxPRSetChildSubreaper), 1, 0, 0, 0, 0)
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
-
-func reapReparentedChildren() int {
-	if runtime.GOOS != "linux" {
-		return 0
-	}
-	reaped := 0
-	for {
-		var status syscall.WaitStatus
-		pid, err := syscall.Wait4(-1, &status, syscall.WNOHANG, nil)
-		if pid <= 0 || err != nil {
-			return reaped
-		}
-		reaped++
-	}
-}
-
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	return atomicWriteFileContext(context.Background(), path, data, perm)
+}
+
+func atomicWriteFileContext(ctx context.Context, path string, data []byte, perm os.FileMode) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
@@ -1115,7 +997,15 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
 
+	if err := ctx.Err(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -1123,10 +1013,20 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		_ = tmp.Close()
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.Chmod(tmpName, perm); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return os.Rename(tmpName, path)
