@@ -77,6 +77,17 @@ Key docs:
 - `docs/ARCHITECTURE.md`
 - `docs/MIGRATION_FROM_JUMI.md`
 
+## Runtimehelper Package Map
+
+- `helper.go`: Run/Inspect orchestration, remote fetch, env/contract conversion
+- `config.go`: runtime helper config and validation
+- `supervisor.go`: command lifecycle, process group supervision, signal lifecycle
+- `supervisor_linux.go`: Linux process group, subreaper, and reap primitives
+- `outputs.go`: output inspection and artifact manifest record construction
+- `cas.go`: node-local CAS promotion and digest verification
+- `manifest.go`: atomic manifest writes and termination log writes
+- `paths.go`: output/input/node-local path safety helpers
+
 ## Near-Term Tasks
 
 1. Move the helper source from JUMI into this repository.
