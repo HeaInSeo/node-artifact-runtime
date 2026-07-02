@@ -79,10 +79,14 @@ Key docs:
 
 ## Runtimehelper Package Map
 
-- `helper.go`: Run/Inspect orchestration, remote fetch, env/contract conversion
+- `helper.go`: Run/Inspect orchestration and small shared runtime helpers
 - `config.go`: runtime helper config and validation
 - `supervisor.go`: command lifecycle, process group supervision, signal lifecycle
 - `supervisor_linux.go`: Linux process group, subreaper, and reap primitives
+- `materialize.go`: input materialization, remote fetch, and local reuse
+- `contract.go`: JUMI node contract to runtime helper config conversion
+- `env.go`: JUMI input env parsing and command env construction
+- `util.go`: package-level utility helpers
 - `outputs.go`: output inspection and artifact manifest record construction
 - `cas.go`: node-local CAS promotion and digest verification
 - `manifest.go`: atomic manifest writes and termination log writes

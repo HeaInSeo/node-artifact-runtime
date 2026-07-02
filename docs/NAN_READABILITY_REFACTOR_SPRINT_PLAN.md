@@ -185,14 +185,14 @@ readability documentation.
    - secure output, input, node-local, and relative path helpers are grouped.
    - path security tests continue to pass.
 
-3. Move contract/env conversion into focused files.
+3. Move contract/env conversion into focused files. `[done: 2026-07-02]`
 
    Acceptance:
 
    - contract-to-config conversion is in `contract.go`.
    - env parsing and command env construction are in `env.go`.
 
-4. Add a package map.
+4. Add a package map. `[done: 2026-07-02]`
 
    Acceptance:
 
