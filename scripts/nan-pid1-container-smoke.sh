@@ -22,6 +22,11 @@ mkdir -p "$RUNTIME_DIR" "$WORK_DIR/out" "$WORK_DIR/work"
 chmod 700 "$RUNTIME_DIR"
 export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 
+VOLUME_SUFFIX=":Z"
+if [[ "$ENGINE" == "docker" ]]; then
+	VOLUME_SUFFIX=""
+fi
+
 make -C "$ROOT_DIR" build
 
 cat >"$WORK_DIR/Containerfile" <<EOF
@@ -34,8 +39,8 @@ EOF
 
 "$ENGINE" run -d \
 	--name "$CONTAINER_NAME" \
-	-v "$WORK_DIR/out:/out:Z" \
-	-v "$WORK_DIR/work:/work:Z" \
+	-v "$WORK_DIR/out:/out${VOLUME_SUFFIX}" \
+	-v "$WORK_DIR/work:/work${VOLUME_SUFFIX}" \
 	"$IMAGE" \
 	run \
 	--run-id smoke \

@@ -1,0 +1,43 @@
+name: Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "cmd/**"
+      - "pkg/**"
+      - "scripts/nan-pid1-container-smoke.sh"
+      - "Makefile"
+      - ".github/workflows/smoke.yml"
+  pull_request:
+    paths:
+      - "cmd/**"
+      - "pkg/**"
+      - "scripts/nan-pid1-container-smoke.sh"
+      - "Makefile"
+      - ".github/workflows/smoke.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pid1-container:
+    name: PID 1 Container Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run PID 1 smoke
+        env:
+          CONTAINER_ENGINE: docker
+        run: make smoke-pid1-container

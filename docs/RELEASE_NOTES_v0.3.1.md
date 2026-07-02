@@ -48,9 +48,8 @@ and does not publish a success manifest during shutdown.
 
 ## Known Policy Gap
 
-Directory outputs remain a policy decision. For production correctness, either
-reject directory outputs explicitly or implement a deterministic tree manifest
-with sorted entries and per-file digests before treating directories as
-supported artifacts.
+Directory outputs are explicitly rejected for production correctness until a
+deterministic tree manifest with sorted entries and per-file digests is
+implemented.
 
 Tracking issue: https://github.com/HeaInSeo/node-artifact-runtime/issues/1

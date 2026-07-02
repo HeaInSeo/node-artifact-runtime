@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-const Version = "v0.3.1"
+const Version = "v0.3.2"
 
 var (
 	errInvalidConfig         = errors.New("invalid config")
