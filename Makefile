@@ -20,7 +20,7 @@ PKGS_COVER    := ./cmd/... ./pkg/...
 PKGS_SECURITY := ./cmd/... ./pkg/...
 COVERAGE_THRESHOLD := 70
 
-.PHONY: test coverage coverage-check fmt vet build lint lint-depguard lint-security vuln vuln-all golangci-lint govulncheck
+.PHONY: test coverage coverage-check fmt vet build smoke-pid1-container lint lint-depguard lint-security vuln vuln-all golangci-lint govulncheck
 
 test:
 	@mkdir -p "$(GOCACHE_DIR)" "$(GOTMPDIR_DIR)"
@@ -51,6 +51,9 @@ vet:
 build:
 	@mkdir -p "$(LOCALBIN)" "$(GOCACHE_DIR)" "$(GOTMPDIR_DIR)"
 	CGO_ENABLED=0 $(GOENV) go build -o "$(LOCALBIN)/nan" ./cmd/node-artifact-runtime
+
+smoke-pid1-container:
+	scripts/nan-pid1-container-smoke.sh
 
 golangci-lint:
 	@mkdir -p "$(LOCALBIN)"

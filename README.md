@@ -73,13 +73,17 @@ Key docs:
 - `docs/NAN_COMMERCIAL_READINESS_REVIEW.md`
 - `docs/NAN_PRODUCTION_HARDENING_SPRINT_PLAN.md`
 - `docs/NAN_READABILITY_REFACTOR_SPRINT_PLAN.md`
+- `docs/RELEASE_NOTES_v0.3.1.md`
 - `docs/NAN_INPUT_MATERIALIZATION_DRAFT.md`
 - `docs/ARCHITECTURE.md`
 - `docs/MIGRATION_FROM_JUMI.md`
 
 ## Runtimehelper Package Map
 
-- `helper.go`: Run/Inspect orchestration and small shared runtime helpers
+- `helper.go`: version, exit codes, and package-level runtime errors
+- `run.go`: `nan run` lifecycle orchestration
+- `inspect.go`: standalone inspect orchestration and output-name parsing
+- `command_helpers.go`: command exit-code, stream, and helper error classification
 - `config.go`: runtime helper config and validation
 - `supervisor.go`: command lifecycle, process group supervision, signal lifecycle
 - `supervisor_linux.go`: Linux process group, subreaper, and reap primitives
@@ -91,6 +95,16 @@ Key docs:
 - `cas.go`: node-local CAS promotion and digest verification
 - `manifest.go`: atomic manifest writes and termination log writes
 - `paths.go`: output/input/node-local path safety helpers
+
+## Runtime Smoke Tests
+
+```text
+make smoke-pid1-container
+```
+
+This builds `bin/nan`, packages it into a minimal container image, runs it as
+PID 1, sends SIGTERM to the container, and verifies that shutdown exits with
+signal-style code `143` without publishing a success artifact manifest.
 
 ## Near-Term Tasks
 
