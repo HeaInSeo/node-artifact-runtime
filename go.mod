@@ -1,3 +1,3 @@
 module github.com/HeaInSeo/node-artifact-runtime
 
-go 1.25.10
+go 1.25.12

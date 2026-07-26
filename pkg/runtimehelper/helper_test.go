@@ -1125,7 +1125,7 @@ func TestRunExternalSIGTERMSuppressesManifest(t *testing.T) {
 	manifestPath := filepath.Join(tmpDir, "_meta", "artifacts.manifest.json")
 	terminationPath := filepath.Join(tmpDir, "termination.log")
 	pidPath := filepath.Join(tmpDir, "grandchild.pid")
-	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimeHelperSignalSubprocess")
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimeHelperSignalSubprocess") //nolint:gosec // os.Args[0] is this test binary's own path, not attacker input
 	cmd.Env = append(os.Environ(),
 		"NAN_HELPER_SIGNAL_SUBPROCESS=1",
 		"NAN_HELPER_SIGNAL_OUTPUT_ROOT="+tmpDir,

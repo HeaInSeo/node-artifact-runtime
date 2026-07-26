@@ -60,10 +60,6 @@ func EmitArtifactsContext(ctx context.Context, cfg Config) error {
 	return nil
 }
 
-func buildArtifactRecord(cfg Config, output OutputSpec) (provenance.ArtifactRecord, bool, error) {
-	return buildArtifactRecordContext(context.Background(), cfg, output)
-}
-
 func buildArtifactRecordContext(ctx context.Context, cfg Config, output OutputSpec) (provenance.ArtifactRecord, bool, error) {
 	path, err := secureOutputPath(cfg.OutputRoot, output.Path)
 	if err != nil {

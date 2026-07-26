@@ -8,10 +8,6 @@ import (
 	"path/filepath"
 )
 
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	return atomicWriteFileContext(context.Background(), path, data, perm)
-}
-
 func atomicWriteFileContext(ctx context.Context, path string, data []byte, perm os.FileMode) error {
 	if err := ctx.Err(); err != nil {
 		return err
