@@ -15,11 +15,30 @@ on:
 permissions:
   contents: read
 
+env:
+  ACTIONLINT_VERSION: v1.7.7
+
 concurrency:
   group: test-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  actionlint:
+    name: Actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Validate GitHub Actions workflows
+        run: go run "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+
   test:
     name: Unit And Coverage
     runs-on: ubuntu-latest
@@ -31,6 +50,11 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+
+      - name: Verify go.mod and go.sum are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
 
       - name: Run tests
         run: make test
