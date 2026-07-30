@@ -1196,7 +1196,7 @@ func TestRunExternalSignalIsForwardedAndObservedByChild(t *testing.T) {
 			terminationPath := filepath.Join(tmpDir, "termination.log")
 			pidPath := filepath.Join(tmpDir, "grandchild.pid")
 			markerDir := filepath.Join(tmpDir, "markers")
-			if err := os.MkdirAll(markerDir, 0o755); err != nil {
+			if err := os.MkdirAll(markerDir, 0o750); err != nil {
 				t.Fatalf("mkdir marker dir: %v", err)
 			}
 
