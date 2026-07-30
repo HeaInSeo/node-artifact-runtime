@@ -1179,6 +1179,212 @@ func TestRunExternalSIGTERMSuppressesManifest(t *testing.T) {
 	}
 }
 
+// TestRunExternalSignalIsForwardedAndObservedByChild extends the SIGTERM-only
+// coverage above to SIGINT/SIGHUP/SIGQUIT, and - unlike the SIGTERM test,
+// which only checks nan's own exit code and manifest suppression - proves
+// the wrapped child actually *received* the specific signal nan forwarded,
+// not just that nan itself reacted to it. The child traps each of the four
+// signals separately and writes a signal-specific marker file; the test
+// asserts only the marker for the signal actually sent exists, and none of
+// the others do.
+func TestRunExternalSignalIsForwardedAndObservedByChild(t *testing.T) {
+	signals := []syscall.Signal{syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT}
+	for _, sig := range signals {
+		t.Run(sig.String(), func(t *testing.T) {
+			tmpDir := t.TempDir()
+			manifestPath := filepath.Join(tmpDir, "_meta", "artifacts.manifest.json")
+			terminationPath := filepath.Join(tmpDir, "termination.log")
+			pidPath := filepath.Join(tmpDir, "grandchild.pid")
+			markerDir := filepath.Join(tmpDir, "markers")
+			if err := os.MkdirAll(markerDir, 0o750); err != nil {
+				t.Fatalf("mkdir marker dir: %v", err)
+			}
+
+			cmd := exec.Command(os.Args[0], "-test.run=TestRuntimeHelperSignalTrapSubprocess") //nolint:gosec // os.Args[0] is this test binary's own path, not attacker input
+			cmd.Env = append(os.Environ(),
+				"NAN_HELPER_SIGNAL_SUBPROCESS=1",
+				"NAN_HELPER_SIGNAL_OUTPUT_ROOT="+tmpDir,
+				"NAN_HELPER_SIGNAL_MANIFEST_PATH="+manifestPath,
+				"NAN_HELPER_SIGNAL_TERMINATION_PATH="+terminationPath,
+				"NAN_HELPER_SIGNAL_PID_PATH="+pidPath,
+				"NAN_HELPER_SIGNAL_MARKER_DIR="+markerDir,
+			)
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("start helper subprocess: %v", err)
+			}
+			defer func() {
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+			}()
+
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				if _, err := os.Stat(pidPath); err == nil {
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if _, err := os.Stat(pidPath); err != nil {
+				t.Fatalf("child did not signal readiness before deadline: %v", err)
+			}
+
+			if err := cmd.Process.Signal(sig); err != nil {
+				t.Fatalf("send %s to helper subprocess: %v", sig, err)
+			}
+			err := cmd.Wait()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("helper subprocess Wait() error = %v, want ExitError", err)
+			}
+			if exitErr.ExitCode() != signalExitCode(sig) {
+				t.Fatalf("helper subprocess exit = %d, want %d", exitErr.ExitCode(), signalExitCode(sig))
+			}
+
+			markers := map[syscall.Signal]string{
+				syscall.SIGTERM: "term",
+				syscall.SIGINT:  "int",
+				syscall.SIGHUP:  "hup",
+				syscall.SIGQUIT: "quit",
+			}
+			wantMarker := markers[sig]
+			for candidateSig, name := range markers {
+				markerPath := filepath.Join(markerDir, name)
+				_, statErr := os.Stat(markerPath)
+				gotMarker := statErr == nil
+				wantExists := candidateSig == sig
+				if gotMarker != wantExists {
+					if wantExists {
+						t.Errorf("child never trapped %s (expected marker %q, stat err = %v)", sig, wantMarker, statErr)
+					} else {
+						t.Errorf("child trapped %s but we only sent %s (unexpected marker %q present)", candidateSig, sig, name)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestRuntimeHelperSignalTrapSubprocess is the child-process entrypoint for
+// TestRunExternalSignalIsForwardedAndObservedByChild. The wrapped command
+// traps TERM/INT/HUP/QUIT independently so the parent test can tell exactly
+// which signal actually reached the child, rather than inferring it from
+// nan's own exit code.
+func TestRuntimeHelperSignalTrapSubprocess(t *testing.T) {
+	if os.Getenv("NAN_HELPER_SIGNAL_SUBPROCESS") != "1" {
+		return
+	}
+	outputRoot := os.Getenv("NAN_HELPER_SIGNAL_OUTPUT_ROOT")
+	manifestPath := os.Getenv("NAN_HELPER_SIGNAL_MANIFEST_PATH")
+	terminationPath := os.Getenv("NAN_HELPER_SIGNAL_TERMINATION_PATH")
+	pidPath := os.Getenv("NAN_HELPER_SIGNAL_PID_PATH")
+	markerDir := os.Getenv("NAN_HELPER_SIGNAL_MARKER_DIR")
+	script := fmt.Sprintf(
+		`trap 'touch %q; exit 0' TERM
+trap 'touch %q; exit 0' INT
+trap 'touch %q; exit 0' HUP
+trap 'touch %q; exit 0' QUIT
+echo $$ > %q
+while true; do sleep 0.05; done`,
+		filepath.Join(markerDir, "term"),
+		filepath.Join(markerDir, "int"),
+		filepath.Join(markerDir, "hup"),
+		filepath.Join(markerDir, "quit"),
+		pidPath,
+	)
+	code := Run(context.Background(), Config{
+		RunID:               "run-external-signal-trap",
+		NodeID:              "produce",
+		Outputs:             []OutputSpec{{Name: "report", Path: "report", Required: false, Type: "file"}},
+		OutputRoot:          outputRoot,
+		ManifestPath:        manifestPath,
+		TerminationLogPath:  terminationPath,
+		ShutdownGracePeriod: 200 * time.Millisecond,
+		Command:             []string{"sh", "-c", script},
+	})
+	os.Exit(code)
+}
+
+// TestRunDrainsChildStdoutOnFastExit proves the fd-inheritance mechanism
+// nan relies on for stdout capture actually holds end-to-end in a real
+// subprocess chain (parent test -> nan subprocess -> wrapped child), not
+// just by code inspection. The wrapped child bursts a large volume of
+// output and exits immediately, with no delay for nan or the OS to "catch
+// up" - if anything in the chain buffered-then-dropped instead of relying
+// on kernel-level fd inheritance, this would be truncated.
+func TestRunDrainsChildStdoutOnFastExit(t *testing.T) {
+	const wantLines = 5000
+	tmpDir := t.TempDir()
+	manifestPath := filepath.Join(tmpDir, "_meta", "artifacts.manifest.json")
+	terminationPath := filepath.Join(tmpDir, "termination.log")
+	capturePath := filepath.Join(tmpDir, "captured-stdout.txt")
+
+	captureFile, err := os.Create(capturePath) //nolint:gosec // test-owned tmp path
+	if err != nil {
+		t.Fatalf("create capture file: %v", err)
+	}
+	defer func() { _ = captureFile.Close() }()
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestRuntimeHelperDrainSubprocess") //nolint:gosec // os.Args[0] is this test binary's own path, not attacker input
+	cmd.Env = append(os.Environ(),
+		"NAN_HELPER_DRAIN_SUBPROCESS=1",
+		"NAN_HELPER_DRAIN_OUTPUT_ROOT="+tmpDir,
+		"NAN_HELPER_DRAIN_MANIFEST_PATH="+manifestPath,
+		"NAN_HELPER_DRAIN_TERMINATION_PATH="+terminationPath,
+		fmt.Sprintf("NAN_HELPER_DRAIN_LINES=%d", wantLines),
+	)
+	// captureFile is inherited as the subprocess's real os.Stdout fd, exactly
+	// like a container runtime wiring PID1's stdout to the container's log
+	// pipe - this is the actual production path, not a Go-side io.Writer.
+	cmd.Stdout = captureFile
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("helper subprocess failed: %v", err)
+	}
+	if err := captureFile.Sync(); err != nil {
+		t.Fatalf("sync capture file: %v", err)
+	}
+
+	raw, err := os.ReadFile(capturePath) //nolint:gosec // test-owned tmp path
+	if err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) != wantLines {
+		t.Fatalf("captured %d lines, want %d (truncated child output)", len(lines), wantLines)
+	}
+	if want := fmt.Sprintf("line-%d", wantLines); lines[wantLines-1] != want {
+		t.Fatalf("last captured line = %q, want %q (child output truncated before completion)", lines[wantLines-1], want)
+	}
+}
+
+// TestRuntimeHelperDrainSubprocess is the child-process entrypoint for
+// TestRunDrainsChildStdoutOnFastExit. It deliberately does not set
+// cfg.Stdout, so Run() falls back to the real os.Stdout - the inherited fd
+// wired to the parent test's capture file - exercising the same code path
+// production traffic takes.
+func TestRuntimeHelperDrainSubprocess(t *testing.T) {
+	if os.Getenv("NAN_HELPER_DRAIN_SUBPROCESS") != "1" {
+		return
+	}
+	outputRoot := os.Getenv("NAN_HELPER_DRAIN_OUTPUT_ROOT")
+	manifestPath := os.Getenv("NAN_HELPER_DRAIN_MANIFEST_PATH")
+	terminationPath := os.Getenv("NAN_HELPER_DRAIN_TERMINATION_PATH")
+	lines := os.Getenv("NAN_HELPER_DRAIN_LINES")
+	script := fmt.Sprintf(`i=1; while [ "$i" -le %s ]; do echo "line-$i"; i=$((i + 1)); done`, lines)
+	code := Run(context.Background(), Config{
+		RunID:              "run-drain-fast-exit",
+		NodeID:             "produce",
+		Outputs:            []OutputSpec{{Name: "report", Path: "report", Required: false, Type: "file"}},
+		OutputRoot:         outputRoot,
+		ManifestPath:       manifestPath,
+		TerminationLogPath: terminationPath,
+		Command:            []string{"sh", "-c", script},
+	})
+	os.Exit(code)
+}
+
 func TestRunRejectsDirectoryOutputEvenWhenAllowDirectoryOutputSet(t *testing.T) {
 	tmpDir := t.TempDir()
 	manifestPath := filepath.Join(tmpDir, "_meta", "artifacts.manifest.json")
