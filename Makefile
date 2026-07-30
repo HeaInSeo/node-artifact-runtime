@@ -24,11 +24,11 @@ COVERAGE_THRESHOLD := 70
 
 test:
 	@mkdir -p "$(GOCACHE_DIR)" "$(GOTMPDIR_DIR)"
-	$(GOENV) go test $(PKGS_ALL)
+	$(GOENV) go test -race $(PKGS_ALL)
 
 coverage:
 	@mkdir -p "$(REPORT_DIR)" "$(GOCACHE_DIR)" "$(GOTMPDIR_DIR)"
-	$(GOENV) go test $(PKGS_COVER) -coverprofile="$(REPORT_DIR)/cover.out" -covermode=atomic
+	$(GOENV) go test -race $(PKGS_COVER) -coverprofile="$(REPORT_DIR)/cover.out" -covermode=atomic
 	go tool cover -func="$(REPORT_DIR)/cover.out" | tee "$(REPORT_DIR)/coverage.txt"
 
 coverage-check: coverage
