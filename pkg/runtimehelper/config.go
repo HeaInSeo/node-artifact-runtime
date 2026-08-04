@@ -41,6 +41,13 @@ type TerminationSummary struct {
 	AttemptID    string `json:"attemptId,omitempty"`
 	ManifestPath string `json:"manifestPath,omitempty"`
 	Message      string `json:"message,omitempty"`
+	// Reason is a structured, stable classification of the failure, added
+	// additively alongside the free-form Status/Message so downstream
+	// consumers (e.g. JUMI backend) can map to their own reserved reasons
+	// without parsing message strings. Empty when a failure has no structured
+	// reason in the current stable set. See MaterializeReason for the v0.1
+	// materialization reason set.
+	Reason string `json:"reason,omitempty"`
 }
 
 // Config describes the runtime-side artifact helper contract executed inside

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,56 @@ import (
 	"strings"
 	"time"
 )
+
+// MaterializeReason is a structured, stable classification of a materialization
+// failure. It is emitted additively on TerminationSummary.Reason so downstream
+// consumers can map failures to their own reserved reasons without parsing the
+// free-form Status/Message strings.
+//
+// v0.1 stable reason set (do not remove or repurpose existing values; additions
+// are backward compatible). Materialization failures that do not fall into this
+// set carry no reason (empty string) rather than an invented value.
+type MaterializeReason string
+
+const (
+	// ReasonDigestMismatch: the fetched/copied bytes did not match the pinned
+	// expected digest.
+	ReasonDigestMismatch MaterializeReason = "digest_mismatch"
+	// ReasonRemoteUnavailable: the remote source could not be reached or did not
+	// serve the artifact (transport failure or non-200 response).
+	ReasonRemoteUnavailable MaterializeReason = "remote_unavailable"
+	// ReasonPathRejected: the source URI or node-local path was rejected by the
+	// materialization policy (scheme/host/path validation).
+	ReasonPathRejected MaterializeReason = "path_rejected"
+	// ReasonLocalSourceMissing: the node-local source path does not exist.
+	ReasonLocalSourceMissing MaterializeReason = "local_source_missing"
+)
+
+// materializeError wraps a materialization failure with a structured reason
+// while preserving the underlying error chain (including errMaterializeFailed
+// used for exit-code classification and the free-form message).
+type materializeError struct {
+	reason MaterializeReason
+	err    error
+}
+
+func (e *materializeError) Error() string { return e.err.Error() }
+func (e *materializeError) Unwrap() error { return e.err }
+
+// withReason tags err with a structured materialization reason.
+func withReason(reason MaterializeReason, err error) error {
+	return &materializeError{reason: reason, err: err}
+}
+
+// materializeReasonOf extracts the structured reason from a materialization
+// error, returning "" when the failure carries no stable reason.
+func materializeReasonOf(err error) MaterializeReason {
+	var me *materializeError
+	if errors.As(err, &me) {
+		return me.reason
+	}
+	return ""
+}
 
 func MaterializeInputs(ctx context.Context, cfg Config) error {
 	for _, input := range cfg.Inputs {
@@ -43,7 +94,7 @@ func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpe
 		return fmt.Errorf("%w: input %s has empty expected digest", errMaterializeFailed, input.Name)
 	}
 	if err := validateRemoteFetchURI(cfg, input.URI); err != nil {
-		return fmt.Errorf("%w: input %s uri rejected: %v", errMaterializeFailed, input.Name, err)
+		return withReason(ReasonPathRejected, fmt.Errorf("%w: input %s uri rejected: %v", errMaterializeFailed, input.Name, err))
 	}
 	workRoot := effectiveWorkRoot(cfg.WorkRoot)
 	targetPath, err := materializedInputPath(workRoot, input)
@@ -71,12 +122,12 @@ func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpe
 	resp, err := remoteFetchClient(cfg).Do(req)
 	if err != nil {
 		_ = tmpFile.Close()
-		return fmt.Errorf("%w: fetch input %s: %v", errMaterializeFailed, input.Name, err)
+		return withReason(ReasonRemoteUnavailable, fmt.Errorf("%w: fetch input %s: %v", errMaterializeFailed, input.Name, err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		_ = tmpFile.Close()
-		return fmt.Errorf("%w: fetch input %s returned status %d", errMaterializeFailed, input.Name, resp.StatusCode)
+		return withReason(ReasonRemoteUnavailable, fmt.Errorf("%w: fetch input %s returned status %d", errMaterializeFailed, input.Name, resp.StatusCode))
 	}
 	if maxBytes := effectiveHTTPMaxInputBytes(cfg, input); maxBytes > 0 && resp.ContentLength > maxBytes {
 		_ = tmpFile.Close()
@@ -108,7 +159,7 @@ func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpe
 
 	actualDigest := "sha256:" + hex.EncodeToString(hash.Sum(nil))
 	if actualDigest != strings.TrimSpace(input.ExpectedDigest) {
-		return fmt.Errorf("%w: input %s digest mismatch: got %s want %s", errMaterializeFailed, input.Name, actualDigest, input.ExpectedDigest)
+		return withReason(ReasonDigestMismatch, fmt.Errorf("%w: input %s digest mismatch: got %s want %s", errMaterializeFailed, input.Name, actualDigest, input.ExpectedDigest))
 	}
 	if input.ExpectedSizeBytes > 0 && written != input.ExpectedSizeBytes {
 		return fmt.Errorf("%w: input %s size mismatch: got %d want %d", errMaterializeFailed, input.Name, written, input.ExpectedSizeBytes)
@@ -127,7 +178,14 @@ func materializeLocalReuseInput(_ context.Context, cfg Config, input InputSpec) 
 		return fmt.Errorf("%w: input %s has empty expected digest", errMaterializeFailed, input.Name)
 	}
 	if err := validateNodeLocalSourcePath(cfg, input.NodeLocalPath); err != nil {
-		return fmt.Errorf("%w: input %s: %v", errMaterializeFailed, input.Name, err)
+		wrapped := fmt.Errorf("%w: input %s: %v", errMaterializeFailed, input.Name, err)
+		// A validation failure caused by an absent source is local_source_missing;
+		// all other rejections (outside allowed root, symlink, non-absolute) are
+		// path_rejected.
+		if errors.Is(err, os.ErrNotExist) {
+			return withReason(ReasonLocalSourceMissing, wrapped)
+		}
+		return withReason(ReasonPathRejected, wrapped)
 	}
 	workRoot := effectiveWorkRoot(cfg.WorkRoot)
 	targetPath, err := materializedInputPath(workRoot, input)
@@ -150,7 +208,14 @@ func materializeLocalReuseInput(_ context.Context, cfg Config, input InputSpec) 
 	sourceFile, err := os.Open(input.NodeLocalPath)
 	if err != nil {
 		_ = tmpFile.Close()
-		return fmt.Errorf("%w: open node-local input %s: %v", errMaterializeFailed, input.Name, err)
+		openErr := fmt.Errorf("%w: open node-local input %s: %v", errMaterializeFailed, input.Name, err)
+		// Only a genuinely absent source maps to local_source_missing; other
+		// open failures (e.g. permission denied) carry no structured reason
+		// rather than an invented one.
+		if errors.Is(err, os.ErrNotExist) {
+			return withReason(ReasonLocalSourceMissing, openErr)
+		}
+		return openErr
 	}
 	defer func() { _ = sourceFile.Close() }()
 
@@ -170,7 +235,7 @@ func materializeLocalReuseInput(_ context.Context, cfg Config, input InputSpec) 
 
 	actualDigest := "sha256:" + hex.EncodeToString(hash.Sum(nil))
 	if actualDigest != strings.TrimSpace(input.ExpectedDigest) {
-		return fmt.Errorf("%w: input %s digest mismatch: got %s want %s", errMaterializeFailed, input.Name, actualDigest, input.ExpectedDigest)
+		return withReason(ReasonDigestMismatch, fmt.Errorf("%w: input %s digest mismatch: got %s want %s", errMaterializeFailed, input.Name, actualDigest, input.ExpectedDigest))
 	}
 	if input.ExpectedSizeBytes > 0 && written != input.ExpectedSizeBytes {
 		return fmt.Errorf("%w: input %s size mismatch: got %d want %d", errMaterializeFailed, input.Name, written, input.ExpectedSizeBytes)

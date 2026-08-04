@@ -48,6 +48,7 @@ func Run(ctx context.Context, cfg Config) int {
 			NodeID:    cfg.NodeID,
 			AttemptID: cfg.AttemptID,
 			Message:   err.Error(),
+			Reason:    string(materializeReasonOf(err)),
 		})
 		return ExitMaterializeFailed
 	}
