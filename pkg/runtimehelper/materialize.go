@@ -66,6 +66,26 @@ func materializeReasonOf(err error) MaterializeReason {
 	return ""
 }
 
+// policyRejection marks an error as an explicit source-policy rejection (URI
+// scheme/host/query/redirect or node-local path policy) as opposed to a
+// transport or filesystem failure. It lets those be classified as
+// path_rejected while leaving transport/IO errors (which are indistinguishable
+// by message) unclassified. The wrapped message is preserved unchanged.
+type policyRejection struct{ err error }
+
+func (e *policyRejection) Error() string { return e.err.Error() }
+func (e *policyRejection) Unwrap() error { return e.err }
+
+// markPolicyRejection tags err as an explicit source-policy rejection.
+func markPolicyRejection(err error) error { return &policyRejection{err: err} }
+
+// isPolicyRejection reports whether err was tagged as an explicit source-policy
+// rejection, traversing wrappers such as *url.Error inserted by http.Client.
+func isPolicyRejection(err error) bool {
+	var pe *policyRejection
+	return errors.As(err, &pe)
+}
+
 func MaterializeInputs(ctx context.Context, cfg Config) error {
 	for _, input := range cfg.Inputs {
 		switch strings.TrimSpace(input.MaterializationMode) {
@@ -122,7 +142,14 @@ func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpe
 	resp, err := remoteFetchClient(cfg).Do(req)
 	if err != nil {
 		_ = tmpFile.Close()
-		return withReason(ReasonRemoteUnavailable, fmt.Errorf("%w: fetch input %s: %v", errMaterializeFailed, input.Name, err))
+		wrapped := fmt.Errorf("%w: fetch input %s: %v", errMaterializeFailed, input.Name, err)
+		// A redirect rejected by CheckRedirect (disallowed host/query, scheme
+		// downgrade, too many redirects) is a URI policy rejection, not remote
+		// unavailability; only genuine transport failures are remote_unavailable.
+		if isPolicyRejection(err) {
+			return withReason(ReasonPathRejected, wrapped)
+		}
+		return withReason(ReasonRemoteUnavailable, wrapped)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
@@ -179,13 +206,20 @@ func materializeLocalReuseInput(_ context.Context, cfg Config, input InputSpec) 
 	}
 	if err := validateNodeLocalSourcePath(cfg, input.NodeLocalPath); err != nil {
 		wrapped := fmt.Errorf("%w: input %s: %v", errMaterializeFailed, input.Name, err)
-		// A validation failure caused by an absent source is local_source_missing;
-		// all other rejections (outside allowed root, symlink, non-absolute) are
-		// path_rejected.
-		if errors.Is(err, os.ErrNotExist) {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			// The source (or its resolved path) is absent.
 			return withReason(ReasonLocalSourceMissing, wrapped)
+		case isPolicyRejection(err):
+			// Explicit path-policy violation (non-absolute, outside allowed
+			// root, symlink, escapes resolved root, root not configured).
+			return withReason(ReasonPathRejected, wrapped)
+		default:
+			// A non-policy filesystem/IO error (e.g. EACCES, ENOTDIR) is not a
+			// deliberate policy rejection; leave it unclassified rather than
+			// inventing a reason.
+			return wrapped
 		}
-		return withReason(ReasonPathRejected, wrapped)
 	}
 	workRoot := effectiveWorkRoot(cfg.WorkRoot)
 	targetPath, err := materializedInputPath(workRoot, input)
@@ -361,12 +395,15 @@ func remoteFetchClient(cfg Config) *http.Client {
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= maxRedirects {
-				return fmt.Errorf("too many redirects")
+				return markPolicyRejection(fmt.Errorf("too many redirects"))
 			}
 			if len(via) > 0 && via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme == "http" {
-				return fmt.Errorf("redirect scheme downgrade is not allowed")
+				return markPolicyRejection(fmt.Errorf("redirect scheme downgrade is not allowed"))
 			}
-			return validateRemoteFetchURI(cfg, req.URL.String())
+			if err := validateRemoteFetchURI(cfg, req.URL.String()); err != nil {
+				return markPolicyRejection(err)
+			}
+			return nil
 		},
 	}
 }

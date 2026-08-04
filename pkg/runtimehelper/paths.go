@@ -30,11 +30,11 @@ func secureOutputPath(outputRoot, declaredPath string) (string, error) {
 
 func validateNodeLocalSourcePath(cfg Config, sourcePath string) error {
 	if !filepath.IsAbs(sourcePath) {
-		return fmt.Errorf("node-local source path must be absolute: %q", sourcePath)
+		return markPolicyRejection(fmt.Errorf("node-local source path must be absolute: %q", sourcePath))
 	}
 	root := strings.TrimSpace(cfg.NodeLocalArtifactRoot)
 	if root == "" {
-		return fmt.Errorf("node-local artifact root is required for local_reuse")
+		return markPolicyRejection(fmt.Errorf("node-local artifact root is required for local_reuse"))
 	}
 	cleanedRoot := filepath.Clean(root)
 	cleanedPath := filepath.Clean(sourcePath)
@@ -43,14 +43,14 @@ func validateNodeLocalSourcePath(cfg Config, sourcePath string) error {
 		return err
 	}
 	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return fmt.Errorf("node-local source path %q is outside allowed root %q", sourcePath, cleanedRoot)
+		return markPolicyRejection(fmt.Errorf("node-local source path %q is outside allowed root %q", sourcePath, cleanedRoot))
 	}
 	info, err := os.Lstat(cleanedPath)
 	if err != nil {
 		return err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("node-local source path %q must not be a symlink", sourcePath)
+		return markPolicyRejection(fmt.Errorf("node-local source path %q must not be a symlink", sourcePath))
 	}
 	realRoot, err := filepath.EvalSymlinks(cleanedRoot)
 	if err != nil {
@@ -65,7 +65,7 @@ func validateNodeLocalSourcePath(cfg Config, sourcePath string) error {
 		return err
 	}
 	if realRel == "." || realRel == ".." || strings.HasPrefix(realRel, ".."+string(os.PathSeparator)) {
-		return fmt.Errorf("node-local source path %q escapes resolved root %q", sourcePath, realRoot)
+		return markPolicyRejection(fmt.Errorf("node-local source path %q escapes resolved root %q", sourcePath, realRoot))
 	}
 	return nil
 }

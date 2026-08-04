@@ -174,6 +174,67 @@ func TestRunLocalReuseOutsideRootSetsPathRejectedReason(t *testing.T) {
 	}
 }
 
+// TestRunRemoteFetchRedirectRejectionSetsPathRejectedReason verifies that a
+// redirect rejected by CheckRedirect (disallowed host) is classified as a URI
+// policy rejection (path_rejected), not remote_unavailable. Before the fix the
+// blanket Do() error wrapper reported remote_unavailable.
+func TestRunRemoteFetchRedirectRejectionSetsPathRejectedReason(t *testing.T) {
+	tmpDir := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://disallowed.example/artifact", http.StatusFound)
+	}))
+	defer server.Close()
+	summary := runToSummary(t, tmpDir, Config{
+		RunID:            "reason-redirect-rejected",
+		NodeID:           "consume",
+		Inputs:           []InputSpec{{Name: "dataset", URI: localhostURL(t, server.URL) + "/dataset", ExpectedDigest: "sha256:deadbeef", MaterializationMode: "remote_fetch"}},
+		WorkRoot:         tmpDir,
+		HTTPAllowedHosts: []string{"localhost"},
+		OutputRoot:       tmpDir,
+		ManifestPath:     filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:          []string{"sh", "-c", "exit 0"},
+	})
+	if summary.Reason != string(ReasonPathRejected) {
+		t.Fatalf("reason = %q, want %q", summary.Reason, ReasonPathRejected)
+	}
+}
+
+// TestRunLocalReuseFilesystemErrorIsUnclassified verifies that a non-policy,
+// non-absent filesystem error during node-local path validation (here ENOTDIR:
+// a path component is a regular file) is left unclassified rather than
+// mislabeled path_rejected. Before the fix the blanket fallback reported
+// path_rejected for any non-NotExist validation error, including EACCES/ENOTDIR.
+func TestRunLocalReuseFilesystemErrorIsUnclassified(t *testing.T) {
+	tmpDir := t.TempDir()
+	nodeLocalDir := filepath.Join(tmpDir, "node-local")
+	if err := os.MkdirAll(nodeLocalDir, 0o750); err != nil {
+		t.Fatalf("mkdir node-local dir: %v", err)
+	}
+	// A regular file used as if it were a directory component yields ENOTDIR
+	// (a filesystem error distinct from os.ErrNotExist and from any policy check).
+	notADir := filepath.Join(nodeLocalDir, "afile")
+	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write file component: %v", err)
+	}
+	source := filepath.Join(notADir, "child.bin")
+	summary := runToSummary(t, tmpDir, Config{
+		RunID:                 "reason-fs-error",
+		NodeID:                "consume",
+		Inputs:                []InputSpec{{Name: "dataset", NodeLocalPath: source, ExpectedDigest: "sha256:deadbeef", MaterializationMode: "local_reuse"}},
+		WorkRoot:              tmpDir,
+		NodeLocalArtifactRoot: nodeLocalDir,
+		OutputRoot:            tmpDir,
+		ManifestPath:          filepath.Join(tmpDir, "_meta", "artifacts.manifest.json"),
+		Command:               []string{"sh", "-c", "exit 0"},
+	})
+	if summary.Reason != "" {
+		t.Fatalf("reason = %q, want empty (unclassified filesystem error)", summary.Reason)
+	}
+	if summary.Status != "materialization_failed" {
+		t.Fatalf("status = %q, want materialization_failed", summary.Status)
+	}
+}
+
 // runRemoteFetchFailure runs a remote_fetch materialization against a test
 // server whose handler is expected to produce a materialization failure, and
 // returns the parsed termination summary.
