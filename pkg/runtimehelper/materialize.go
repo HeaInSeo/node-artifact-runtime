@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,76 @@ import (
 	"strings"
 	"time"
 )
+
+// MaterializeReason is a structured, stable classification of a materialization
+// failure. It is emitted additively on TerminationSummary.Reason so downstream
+// consumers can map failures to their own reserved reasons without parsing the
+// free-form Status/Message strings.
+//
+// v0.1 stable reason set (do not remove or repurpose existing values; additions
+// are backward compatible). Materialization failures that do not fall into this
+// set carry no reason (empty string) rather than an invented value.
+type MaterializeReason string
+
+const (
+	// ReasonDigestMismatch: the fetched/copied bytes did not match the pinned
+	// expected digest.
+	ReasonDigestMismatch MaterializeReason = "digest_mismatch"
+	// ReasonRemoteUnavailable: the remote source could not be reached or did not
+	// serve the artifact (transport failure or non-200 response).
+	ReasonRemoteUnavailable MaterializeReason = "remote_unavailable"
+	// ReasonPathRejected: the source URI or node-local path was rejected by the
+	// materialization policy (scheme/host/path validation).
+	ReasonPathRejected MaterializeReason = "path_rejected"
+	// ReasonLocalSourceMissing: the node-local source path does not exist.
+	ReasonLocalSourceMissing MaterializeReason = "local_source_missing"
+)
+
+// materializeError wraps a materialization failure with a structured reason
+// while preserving the underlying error chain (including errMaterializeFailed
+// used for exit-code classification and the free-form message).
+type materializeError struct {
+	reason MaterializeReason
+	err    error
+}
+
+func (e *materializeError) Error() string { return e.err.Error() }
+func (e *materializeError) Unwrap() error { return e.err }
+
+// withReason tags err with a structured materialization reason.
+func withReason(reason MaterializeReason, err error) error {
+	return &materializeError{reason: reason, err: err}
+}
+
+// materializeReasonOf extracts the structured reason from a materialization
+// error, returning "" when the failure carries no stable reason.
+func materializeReasonOf(err error) MaterializeReason {
+	var me *materializeError
+	if errors.As(err, &me) {
+		return me.reason
+	}
+	return ""
+}
+
+// policyRejection marks an error as an explicit source-policy rejection (URI
+// scheme/host/query/redirect or node-local path policy) as opposed to a
+// transport or filesystem failure. It lets those be classified as
+// path_rejected while leaving transport/IO errors (which are indistinguishable
+// by message) unclassified. The wrapped message is preserved unchanged.
+type policyRejection struct{ err error }
+
+func (e *policyRejection) Error() string { return e.err.Error() }
+func (e *policyRejection) Unwrap() error { return e.err }
+
+// markPolicyRejection tags err as an explicit source-policy rejection.
+func markPolicyRejection(err error) error { return &policyRejection{err: err} }
+
+// isPolicyRejection reports whether err was tagged as an explicit source-policy
+// rejection, traversing wrappers such as *url.Error inserted by http.Client.
+func isPolicyRejection(err error) bool {
+	var pe *policyRejection
+	return errors.As(err, &pe)
+}
 
 func MaterializeInputs(ctx context.Context, cfg Config) error {
 	for _, input := range cfg.Inputs {
@@ -43,7 +114,7 @@ func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpe
 		return fmt.Errorf("%w: input %s has empty expected digest", errMaterializeFailed, input.Name)
 	}
 	if err := validateRemoteFetchURI(cfg, input.URI); err != nil {
-		return fmt.Errorf("%w: input %s uri rejected: %v", errMaterializeFailed, input.Name, err)
+		return withReason(ReasonPathRejected, fmt.Errorf("%w: input %s uri rejected: %v", errMaterializeFailed, input.Name, err))
 	}
 	workRoot := effectiveWorkRoot(cfg.WorkRoot)
 	targetPath, err := materializedInputPath(workRoot, input)
@@ -71,12 +142,19 @@ func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpe
 	resp, err := remoteFetchClient(cfg).Do(req)
 	if err != nil {
 		_ = tmpFile.Close()
-		return fmt.Errorf("%w: fetch input %s: %v", errMaterializeFailed, input.Name, err)
+		wrapped := fmt.Errorf("%w: fetch input %s: %v", errMaterializeFailed, input.Name, err)
+		// A redirect rejected by CheckRedirect (disallowed host/query, scheme
+		// downgrade, too many redirects) is a URI policy rejection, not remote
+		// unavailability; only genuine transport failures are remote_unavailable.
+		if isPolicyRejection(err) {
+			return withReason(ReasonPathRejected, wrapped)
+		}
+		return withReason(ReasonRemoteUnavailable, wrapped)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		_ = tmpFile.Close()
-		return fmt.Errorf("%w: fetch input %s returned status %d", errMaterializeFailed, input.Name, resp.StatusCode)
+		return withReason(ReasonRemoteUnavailable, fmt.Errorf("%w: fetch input %s returned status %d", errMaterializeFailed, input.Name, resp.StatusCode))
 	}
 	if maxBytes := effectiveHTTPMaxInputBytes(cfg, input); maxBytes > 0 && resp.ContentLength > maxBytes {
 		_ = tmpFile.Close()
@@ -108,7 +186,7 @@ func materializeRemoteFetchInput(ctx context.Context, cfg Config, input InputSpe
 
 	actualDigest := "sha256:" + hex.EncodeToString(hash.Sum(nil))
 	if actualDigest != strings.TrimSpace(input.ExpectedDigest) {
-		return fmt.Errorf("%w: input %s digest mismatch: got %s want %s", errMaterializeFailed, input.Name, actualDigest, input.ExpectedDigest)
+		return withReason(ReasonDigestMismatch, fmt.Errorf("%w: input %s digest mismatch: got %s want %s", errMaterializeFailed, input.Name, actualDigest, input.ExpectedDigest))
 	}
 	if input.ExpectedSizeBytes > 0 && written != input.ExpectedSizeBytes {
 		return fmt.Errorf("%w: input %s size mismatch: got %d want %d", errMaterializeFailed, input.Name, written, input.ExpectedSizeBytes)
@@ -127,7 +205,21 @@ func materializeLocalReuseInput(_ context.Context, cfg Config, input InputSpec) 
 		return fmt.Errorf("%w: input %s has empty expected digest", errMaterializeFailed, input.Name)
 	}
 	if err := validateNodeLocalSourcePath(cfg, input.NodeLocalPath); err != nil {
-		return fmt.Errorf("%w: input %s: %v", errMaterializeFailed, input.Name, err)
+		wrapped := fmt.Errorf("%w: input %s: %v", errMaterializeFailed, input.Name, err)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			// The source (or its resolved path) is absent.
+			return withReason(ReasonLocalSourceMissing, wrapped)
+		case isPolicyRejection(err):
+			// Explicit path-policy violation (non-absolute, outside allowed
+			// root, symlink, escapes resolved root, root not configured).
+			return withReason(ReasonPathRejected, wrapped)
+		default:
+			// A non-policy filesystem/IO error (e.g. EACCES, ENOTDIR) is not a
+			// deliberate policy rejection; leave it unclassified rather than
+			// inventing a reason.
+			return wrapped
+		}
 	}
 	workRoot := effectiveWorkRoot(cfg.WorkRoot)
 	targetPath, err := materializedInputPath(workRoot, input)
@@ -150,7 +242,14 @@ func materializeLocalReuseInput(_ context.Context, cfg Config, input InputSpec) 
 	sourceFile, err := os.Open(input.NodeLocalPath)
 	if err != nil {
 		_ = tmpFile.Close()
-		return fmt.Errorf("%w: open node-local input %s: %v", errMaterializeFailed, input.Name, err)
+		openErr := fmt.Errorf("%w: open node-local input %s: %v", errMaterializeFailed, input.Name, err)
+		// Only a genuinely absent source maps to local_source_missing; other
+		// open failures (e.g. permission denied) carry no structured reason
+		// rather than an invented one.
+		if errors.Is(err, os.ErrNotExist) {
+			return withReason(ReasonLocalSourceMissing, openErr)
+		}
+		return openErr
 	}
 	defer func() { _ = sourceFile.Close() }()
 
@@ -170,7 +269,7 @@ func materializeLocalReuseInput(_ context.Context, cfg Config, input InputSpec) 
 
 	actualDigest := "sha256:" + hex.EncodeToString(hash.Sum(nil))
 	if actualDigest != strings.TrimSpace(input.ExpectedDigest) {
-		return fmt.Errorf("%w: input %s digest mismatch: got %s want %s", errMaterializeFailed, input.Name, actualDigest, input.ExpectedDigest)
+		return withReason(ReasonDigestMismatch, fmt.Errorf("%w: input %s digest mismatch: got %s want %s", errMaterializeFailed, input.Name, actualDigest, input.ExpectedDigest))
 	}
 	if input.ExpectedSizeBytes > 0 && written != input.ExpectedSizeBytes {
 		return fmt.Errorf("%w: input %s size mismatch: got %d want %d", errMaterializeFailed, input.Name, written, input.ExpectedSizeBytes)
@@ -296,12 +395,15 @@ func remoteFetchClient(cfg Config) *http.Client {
 		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= maxRedirects {
-				return fmt.Errorf("too many redirects")
+				return markPolicyRejection(fmt.Errorf("too many redirects"))
 			}
 			if len(via) > 0 && via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme == "http" {
-				return fmt.Errorf("redirect scheme downgrade is not allowed")
+				return markPolicyRejection(fmt.Errorf("redirect scheme downgrade is not allowed"))
 			}
-			return validateRemoteFetchURI(cfg, req.URL.String())
+			if err := validateRemoteFetchURI(cfg, req.URL.String()); err != nil {
+				return markPolicyRejection(err)
+			}
+			return nil
 		},
 	}
 }
