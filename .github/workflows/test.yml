@@ -29,7 +29,7 @@ jobs:
 
       - name: Detect docs-only change
         id: changes
-        uses: ./.github/actions/detect-docs-only
+        uses: HeaInSeo/platform-ci-actions/.github/actions/detect-docs-only@62c0d29be4f80824cb767bf184512ce9f624d2ff
 
       - name: Setup Go
         if: steps.changes.outputs.docs_only != 'true'
@@ -52,7 +52,7 @@ jobs:
 
       - name: Detect docs-only change
         id: changes
-        uses: ./.github/actions/detect-docs-only
+        uses: HeaInSeo/platform-ci-actions/.github/actions/detect-docs-only@62c0d29be4f80824cb767bf184512ce9f624d2ff
 
       - name: Setup Go
         if: steps.changes.outputs.docs_only != 'true'
