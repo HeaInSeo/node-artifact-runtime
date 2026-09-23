@@ -4,6 +4,7 @@ package runtimehelper
 
 import (
 	"errors"
+	"os/exec"
 	"syscall"
 )
 
@@ -34,8 +35,8 @@ func reapReparentedChildren() int {
 
 type childReaper struct{}
 
-func startChildReaper(int) *childReaper {
-	return &childReaper{}
+func startReapedCommand(*exec.Cmd) (*childReaper, error) {
+	return nil, errSupervisorUnsupported
 }
 
 func (*childReaper) waitDirect() (childExit, bool) {

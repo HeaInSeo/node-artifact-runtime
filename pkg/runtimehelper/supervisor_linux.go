@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -44,11 +45,14 @@ func enableChildSubreaper() error {
 	return nil
 }
 
-// reapReparentedChildren reaps every exited child without blocking. It
-// consumes the status of any child, so it must not run while another waiter
-// still owns a child; during executeCommand only the childReaper waits.
+// reapReparentedChildren reaps every exited child without blocking. A
+// registered direct child's status is still routed to its waiter; every other
+// status is discarded, so it must not run while an unrelated waiter (such as
+// exec.Cmd.Wait) still owns a child.
 func reapReparentedChildren() int {
-	return reapChildren(nil)
+	processReaper.mu.Lock()
+	defer processReaper.mu.Unlock()
+	return reapChildren(processReaper.deliverLocked)
 }
 
 func reapChildren(onReaped func(pid int, status syscall.WaitStatus)) int {
@@ -69,73 +73,120 @@ func reapChildren(onReaped func(pid int, status syscall.WaitStatus)) int {
 	}
 }
 
-// childReaper is the only wait4 caller while a user command runs. It reaps on
-// SIGCHLD, on a slow ticker, and on request, routing the direct child's status
-// to waitDirect and discarding the status of adopted descendants.
-type childReaper struct {
-	directPid int
-	direct    chan childExit
-	requests  chan chan struct{}
-	stopCh    chan struct{}
-	done      chan struct{}
-	stopOnce  sync.Once
+// processReaper is the process-wide wait4 owner while any user command runs.
+// wait4(-1) consumes the status of whichever child exits, so overlapping
+// executeCommand calls must share one reaper: it routes each registered
+// direct child's status to that command's waiter and discards the status of
+// adopted descendants. While a command runs, runtimehelper owns every wait4
+// in the process; unrelated os/exec children waited concurrently elsewhere in
+// the same process may lose their status.
+var processReaper = &reaperRegistry{waiters: map[int]*childReaper{}}
 
-	// directReaped is only accessed by the run goroutine.
-	directReaped bool
+type reaperRegistry struct {
+	// mu is held for each reap pass and across starting and registering a
+	// command, so no pass can consume a direct child's status before it has a
+	// waiter.
+	mu      sync.Mutex
+	waiters map[int]*childReaper
+	users   int
+	loop    *reapLoop
 }
 
-func startChildReaper(directPid int) *childReaper {
+type reapLoop struct {
+	requests chan chan struct{}
+	stopCh   chan struct{}
+	done     chan struct{}
+}
+
+// childReaper is one command's handle on the process-wide reaper.
+type childReaper struct {
+	pid         int
+	direct      chan childExit
+	loop        *reapLoop
+	released    chan struct{}
+	releaseOnce sync.Once
+}
+
+// startReapedCommand starts cmd and registers its pid with the process-wide
+// reaper, starting the reap loop if no other command is running.
+func startReapedCommand(cmd *exec.Cmd) (*childReaper, error) {
+	reg := processReaper
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	if reg.loop == nil {
+		reg.loop = startReapLoop(reg)
+	}
+	reg.users++
 	r := &childReaper{
-		directPid: directPid,
-		direct:    make(chan childExit, 1),
-		requests:  make(chan chan struct{}),
-		stopCh:    make(chan struct{}),
-		done:      make(chan struct{}),
+		pid:      cmd.Process.Pid,
+		direct:   make(chan childExit, 1),
+		loop:     reg.loop,
+		released: make(chan struct{}),
+	}
+	reg.waiters[r.pid] = r
+	return r, nil
+}
+
+func startReapLoop(reg *reaperRegistry) *reapLoop {
+	l := &reapLoop{
+		requests: make(chan chan struct{}),
+		stopCh:   make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGCHLD)
-	go r.run(sigCh)
-	return r
+	go l.run(reg, sigCh)
+	return l
 }
 
-func (r *childReaper) run(sigCh chan os.Signal) {
-	defer close(r.done)
+func (l *reapLoop) run(reg *reaperRegistry, sigCh chan os.Signal) {
+	defer close(l.done)
 	defer signal.Stop(sigCh)
 	ticker := time.NewTicker(orphanReapInterval)
 	defer ticker.Stop()
 	for {
-		r.reap()
+		reg.reap()
 		select {
 		case <-sigCh:
 		case <-ticker.C:
-		case ack := <-r.requests:
-			r.reap()
+		case ack := <-l.requests:
+			reg.reap()
 			close(ack)
-		case <-r.stopCh:
-			r.reap()
+		case <-l.stopCh:
+			reg.reap()
 			return
 		}
 	}
 }
 
-func (r *childReaper) reap() {
-	reapChildren(func(pid int, status syscall.WaitStatus) {
-		// Once the direct child is reaped its pid may be reused by a later
-		// adopted descendant, so only the first match is the direct child.
-		if pid == r.directPid && !r.directReaped {
-			r.directReaped = true
-			r.direct <- exitFromWaitStatus(status)
-		}
-	})
+func (reg *reaperRegistry) reap() {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	reapChildren(reg.deliverLocked)
+}
+
+// deliverLocked routes a reaped status to its registered waiter. A pid is
+// unregistered once reaped, so a later adopted descendant that reuses it is
+// discarded.
+func (reg *reaperRegistry) deliverLocked(pid int, status syscall.WaitStatus) {
+	r, ok := reg.waiters[pid]
+	if !ok {
+		return
+	}
+	delete(reg.waiters, pid)
+	r.direct <- exitFromWaitStatus(status)
 }
 
 // waitDirect blocks until the direct child's status has been collected. It
-// returns false if the reaper stopped without collecting it.
+// returns false if the command was released without collecting it.
 func (r *childReaper) waitDirect() (childExit, bool) {
 	select {
 	case exit := <-r.direct:
 		return exit, true
-	case <-r.done:
+	case <-r.released:
 		select {
 		case exit := <-r.direct:
 			return exit, true
@@ -149,18 +200,33 @@ func (r *childReaper) waitDirect() (childExit, bool) {
 func (r *childReaper) reapNow() {
 	ack := make(chan struct{})
 	select {
-	case r.requests <- ack:
+	case r.loop.requests <- ack:
 		<-ack
-	case <-r.done:
+	case <-r.loop.done:
 	}
 }
 
-// stop runs a final reap pass and stops the reaper.
+// stop unregisters the command. The last running command stops the reap loop
+// after a final reap pass.
 func (r *childReaper) stop() {
-	r.stopOnce.Do(func() {
-		close(r.stopCh)
+	r.releaseOnce.Do(func() {
+		reg := processReaper
+		reg.mu.Lock()
+		if reg.waiters[r.pid] == r {
+			delete(reg.waiters, r.pid)
+		}
+		reg.users--
+		var last *reapLoop
+		if reg.users == 0 {
+			last, reg.loop = reg.loop, nil
+		}
+		reg.mu.Unlock()
+		close(r.released)
+		if last != nil {
+			close(last.stopCh)
+			<-last.done
+		}
 	})
-	<-r.done
 }
 
 func exitFromWaitStatus(status syscall.WaitStatus) childExit {

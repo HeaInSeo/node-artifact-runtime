@@ -170,6 +170,39 @@ func TestExecuteCommandKeepsDirectChildExitCodeWithOrphanChurn(t *testing.T) {
 	}
 }
 
+// TestExecuteCommandOverlappingRunsKeepOwnDirectChildStatus checks that
+// overlapping executeCommand calls share one reaper: no call may consume
+// another call's direct-child status and leave it blocked.
+func TestExecuteCommandOverlappingRunsKeepOwnDirectChildStatus(t *testing.T) {
+	const runs = 6
+	type outcome struct {
+		want   int
+		result commandResult
+	}
+	outcomes := make(chan outcome, runs)
+	for i := 0; i < runs; i++ {
+		want := 10 + i
+		script := fmt.Sprintf("for i in $(seq 10); do (true &); done; sleep 0.0%d; exit %d", i, want)
+		go func() {
+			outcomes <- outcome{want: want, result: executeCommand(context.Background(), Config{
+				Command:             []string{"sh", "-c", script},
+				ShutdownGracePeriod: time.Second,
+			}, nil)}
+		}()
+	}
+	timeout := time.After(10 * time.Second)
+	for i := 0; i < runs; i++ {
+		select {
+		case got := <-outcomes:
+			if got.result.NotClean || got.result.ExitCode != got.want {
+				t.Fatalf("executeCommand() = %+v, want exit code %d", got.result, got.want)
+			}
+		case <-timeout:
+			t.Fatalf("only %d of %d overlapping runs returned; a direct-child status was consumed by another run", i, runs)
+		}
+	}
+}
+
 func TestExecuteCommandCopiesOutputToNonFileWriters(t *testing.T) {
 	var stdout, stderr strings.Builder
 	result := executeCommand(context.Background(), Config{

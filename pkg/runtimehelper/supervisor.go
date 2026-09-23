@@ -118,10 +118,11 @@ func (l *runLifecycle) interruptedSignal() (syscall.Signal, bool) {
 }
 
 // executeCommand runs the user command as the leader of its own process
-// group. While it runs, a single childReaper owns every wait4 call in this
-// process: it hands the direct child's status to exitCh and reaps any
-// descendants reparented to this subreaper. exec.Cmd.Wait is never called, so
-// no second waiter can race the reaper for the direct child's status.
+// group. While it runs, the process-wide reaper owns every wait4 call in this
+// process, including those for overlapping executeCommand calls: it hands the
+// direct child's status to exitCh and reaps any descendants reparented to
+// this subreaper. exec.Cmd.Wait is never called, so no second waiter can race
+// the reaper for the direct child's status.
 func executeCommand(ctx context.Context, cfg Config, lifecycle *runLifecycle) commandResult {
 	if err := enableChildSubreaper(); err != nil {
 		return commandResult{
@@ -157,7 +158,7 @@ func executeCommand(ctx context.Context, cfg Config, lifecycle *runLifecycle) co
 	cmd.SysProcAttr = commandSysProcAttr()
 	cmd.Env = cmdEnv
 
-	err = cmd.Start()
+	reaper, err := startReapedCommand(cmd)
 	stdout.closeParentEnd()
 	stderr.closeParentEnd()
 	if err != nil {
@@ -165,7 +166,6 @@ func executeCommand(ctx context.Context, cfg Config, lifecycle *runLifecycle) co
 	}
 	pgid := cmd.Process.Pid
 
-	reaper := startChildReaper(pgid)
 	defer func() {
 		reaper.stop()
 		_ = cmd.Process.Release()
