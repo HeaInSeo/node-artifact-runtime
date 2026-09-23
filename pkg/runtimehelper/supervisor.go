@@ -3,9 +3,11 @@ package runtimehelper
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -115,6 +117,12 @@ func (l *runLifecycle) interruptedSignal() (syscall.Signal, bool) {
 	return l.signal, true
 }
 
+// executeCommand runs the user command as the leader of its own process
+// group. While it runs, the process-wide reaper owns every wait4 call in this
+// process, including those for overlapping executeCommand calls: it hands the
+// direct child's status to exitCh and reaps any descendants reparented to
+// this subreaper. exec.Cmd.Wait is never called, so no second waiter can race
+// the reaper for the direct child's status.
 func executeCommand(ctx context.Context, cfg Config, lifecycle *runLifecycle) commandResult {
 	if err := enableChildSubreaper(); err != nil {
 		return commandResult{
@@ -123,33 +131,68 @@ func executeCommand(ctx context.Context, cfg Config, lifecycle *runLifecycle) co
 		}
 	}
 
-	// #nosec G204 -- runtimehelper intentionally executes the node command selected by the run spec.
-	cmd := exec.Command(cfg.Command[0], cfg.Command[1:]...)
-	cmd.Stdout = stdoutOrDefault(cfg.Stdout)
-	cmd.Stderr = stderrOrDefault(cfg.Stderr)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmdEnv, err := cfg.commandEnv()
 	if err != nil {
 		return commandResult{Err: err, ExitCode: ExitGenericError}
 	}
+	stdoutW, stderrW := stdoutOrDefault(cfg.Stdout), stderrOrDefault(cfg.Stderr)
+	stdout, err := newCommandOutput(stdoutW)
+	if err != nil {
+		return commandResult{Err: err, ExitCode: ExitGenericError}
+	}
+	outputs := []*commandOutput{stdout}
+	stderr := stdout
+	if !sameWriter(stdoutW, stderrW) {
+		stderr, err = newCommandOutput(stderrW)
+		if err != nil {
+			stdout.closeParentEnd()
+			return commandResult{Err: err, ExitCode: ExitGenericError}
+		}
+		outputs = append(outputs, stderr)
+	}
+
+	// #nosec G204 -- runtimehelper intentionally executes the node command selected by the run spec.
+	cmd := exec.Command(cfg.Command[0], cfg.Command[1:]...)
+	cmd.Stdout = stdout.file
+	cmd.Stderr = stderr.file
+	cmd.SysProcAttr = commandSysProcAttr()
 	cmd.Env = cmdEnv
 
-	if err := cmd.Start(); err != nil {
+	reaper, err := startReapedCommand(cmd)
+	stdout.closeParentEnd()
+	stderr.closeParentEnd()
+	if err != nil {
 		return commandResult{Err: err, ExitCode: ExitGenericError}
 	}
 	pgid := cmd.Process.Pid
 
-	waitCh := make(chan error, 1)
+	defer func() {
+		reaper.stop()
+		_ = cmd.Process.Release()
+	}()
+
+	// exitCh mirrors exec.Cmd.Wait: the direct child's status, delivered only
+	// after any copied output has reached EOF.
+	exitCh := make(chan error, 1)
 	go func() {
-		waitCh <- cmd.Wait()
+		exit, ok := reaper.waitDirect()
+		if !ok {
+			return
+		}
+		err := exit.err()
+		for _, out := range outputs {
+			if copyErr := out.wait(); err == nil && copyErr != nil {
+				err = copyErr
+			}
+		}
+		exitCh <- err
 	}()
 
 	select {
-	case err := <-waitCh:
-		_ = reapReparentedChildren()
+	case err := <-exitCh:
+		reaper.reapNow()
 		if processGroupExists(pgid) {
-			killed := terminateRemainingProcessGroup(pgid, effectiveShutdownGracePeriod(cfg.ShutdownGracePeriod))
-			_ = reapReparentedChildren()
+			killed := terminateRemainingProcessGroup(pgid, effectiveShutdownGracePeriod(cfg.ShutdownGracePeriod), reaper)
 			return commandResult{
 				Err:      fmt.Errorf("%w: user command exited but process group %d still has live processes", errProcessGroupNotClean, pgid),
 				ExitCode: ExitGenericError,
@@ -160,8 +203,7 @@ func executeCommand(ctx context.Context, cfg Config, lifecycle *runLifecycle) co
 		return commandResult{Err: err, ExitCode: exitCode(err)}
 	case <-ctx.Done():
 		if sigv, ok := lifecycle.interruptedSignal(); ok {
-			err, killed := terminateProcessGroupAndWait(pgid, sigv, effectiveShutdownGracePeriod(cfg.ShutdownGracePeriod), waitCh)
-			_ = reapReparentedChildren()
+			err, killed := terminateProcessGroupAndWait(pgid, sigv, effectiveShutdownGracePeriod(cfg.ShutdownGracePeriod), exitCh, reaper)
 			return commandResult{
 				Err:         err,
 				ExitCode:    signalExitCode(sigv),
@@ -170,23 +212,22 @@ func executeCommand(ctx context.Context, cfg Config, lifecycle *runLifecycle) co
 				Signal:      sigv,
 			}
 		}
-		err, killed := terminateProcessGroupAndWait(pgid, syscall.SIGTERM, effectiveShutdownGracePeriod(cfg.ShutdownGracePeriod), waitCh)
-		_ = reapReparentedChildren()
+		err, killed := terminateProcessGroupAndWait(pgid, syscall.SIGTERM, effectiveShutdownGracePeriod(cfg.ShutdownGracePeriod), exitCh, reaper)
 		return commandResult{Err: err, ExitCode: ExitTimeout, TimedOut: true, Killed: killed}
 	}
 }
 
-func terminateRemainingProcessGroup(pgid int, grace time.Duration) bool {
+func terminateRemainingProcessGroup(pgid int, grace time.Duration, reaper *childReaper) bool {
 	_ = signalProcessGroup(pgid, syscall.SIGTERM)
-	if waitForProcessGroupExit(pgid, grace) {
+	if waitForProcessGroupExit(pgid, grace, reaper) {
 		return false
 	}
 	_ = signalProcessGroup(pgid, syscall.SIGKILL)
-	_ = waitForProcessGroupExit(pgid, processGroupKillWait)
+	_ = waitForProcessGroupExit(pgid, processGroupKillWait, reaper)
 	return true
 }
 
-func terminateProcessGroupAndWait(pgid int, sig syscall.Signal, grace time.Duration, waitCh <-chan error) (error, bool) {
+func terminateProcessGroupAndWait(pgid int, sig syscall.Signal, grace time.Duration, exitCh <-chan error, reaper *childReaper) (error, bool) {
 	_ = signalProcessGroup(pgid, sig)
 	var commandErr error
 	directExited := false
@@ -199,27 +240,27 @@ func terminateProcessGroupAndWait(pgid int, sig syscall.Signal, grace time.Durat
 			return commandErr, false
 		}
 		select {
-		case err := <-waitCh:
+		case err := <-exitCh:
 			commandErr = err
 			directExited = true
-			_ = reapReparentedChildren()
+			reaper.reapNow()
 		case <-ticker.C:
-			_ = reapReparentedChildren()
+			reaper.reapNow()
 		case <-deadline.C:
 			_ = signalProcessGroup(pgid, syscall.SIGKILL)
-			commandErr = waitForCommandExit(waitCh, commandErr, &directExited)
-			_ = waitForProcessGroupExit(pgid, processGroupKillWait)
+			commandErr = waitForCommandExit(exitCh, commandErr, &directExited)
+			_ = waitForProcessGroupExit(pgid, processGroupKillWait, reaper)
 			return commandErr, true
 		}
 	}
 }
 
-func waitForCommandExit(waitCh <-chan error, commandErr error, directExited *bool) error {
+func waitForCommandExit(exitCh <-chan error, commandErr error, directExited *bool) error {
 	if directExited != nil && *directExited {
 		return commandErr
 	}
 	select {
-	case err := <-waitCh:
+	case err := <-exitCh:
 		if directExited != nil {
 			*directExited = true
 		}
@@ -229,7 +270,7 @@ func waitForCommandExit(waitCh <-chan error, commandErr error, directExited *boo
 	}
 }
 
-func waitForProcessGroupExit(pgid int, limit time.Duration) bool {
+func waitForProcessGroupExit(pgid int, limit time.Duration, reaper *childReaper) bool {
 	if !processGroupExists(pgid) {
 		return true
 	}
@@ -240,12 +281,12 @@ func waitForProcessGroupExit(pgid int, limit time.Duration) bool {
 	for {
 		select {
 		case <-ticker.C:
-			_ = reapReparentedChildren()
+			reaper.reapNow()
 			if !processGroupExists(pgid) {
 				return true
 			}
 		case <-deadline.C:
-			_ = reapReparentedChildren()
+			reaper.reapNow()
 			return !processGroupExists(pgid)
 		}
 	}
@@ -260,4 +301,101 @@ func effectiveShutdownGracePeriod(value time.Duration) time.Duration {
 
 func signalExitCode(sig syscall.Signal) int {
 	return 128 + int(sig)
+}
+
+// childExit is the direct child's wait status as collected by the child
+// reaper.
+type childExit struct {
+	code       int
+	signaled   bool
+	signal     syscall.Signal
+	coreDumped bool
+}
+
+func (e childExit) err() error {
+	if !e.signaled && e.code == 0 {
+		return nil
+	}
+	return &commandExitError{exit: e}
+}
+
+// commandExitError reports an unsuccessful direct-child status. Its message
+// and ExitCode match exec.ExitError for the same wait status.
+type commandExitError struct {
+	exit childExit
+}
+
+func (e *commandExitError) Error() string {
+	msg := "exit status " + strconv.Itoa(e.exit.code)
+	if e.exit.signaled {
+		msg = "signal: " + e.exit.signal.String()
+	}
+	if e.exit.coreDumped {
+		msg += " (core dumped)"
+	}
+	return msg
+}
+
+// ExitCode returns the exit code of a normally exited child, or -1 if the
+// child was terminated by a signal.
+func (e *commandExitError) ExitCode() int {
+	if e.exit.signaled {
+		return -1
+	}
+	return e.exit.code
+}
+
+// commandOutput is the file a child inherits for one output stream. A
+// writer that is not already a file is fed through a pipe, and wait blocks
+// until every holder of the pipe's write end has closed it, as
+// exec.Cmd.Wait does for its own copy goroutines.
+type commandOutput struct {
+	file    *os.File
+	pipeW   *os.File
+	copyErr chan error
+}
+
+// sameWriter reports whether stdout and stderr go to one writer, in which
+// case they share one pipe as they would with exec.Cmd.
+func sameWriter(a, b io.Writer) (same bool) {
+	defer func() {
+		if recover() != nil {
+			same = false
+		}
+	}()
+	return a == b
+}
+
+func newCommandOutput(w io.Writer) (*commandOutput, error) {
+	if f, ok := w.(*os.File); ok {
+		return &commandOutput{file: f}, nil
+	}
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	out := &commandOutput{file: pw, pipeW: pw, copyErr: make(chan error, 1)}
+	go func() {
+		_, err := io.Copy(w, pr)
+		_ = pr.Close()
+		out.copyErr <- err
+	}()
+	return out, nil
+}
+
+// closeParentEnd closes this process's copy of the pipe write end once the
+// child has inherited it or failed to start, so the copy sees EOF when the
+// last child-side holder exits.
+func (o *commandOutput) closeParentEnd() {
+	if o.pipeW != nil {
+		_ = o.pipeW.Close()
+		o.pipeW = nil
+	}
+}
+
+func (o *commandOutput) wait() error {
+	if o.copyErr == nil {
+		return nil
+	}
+	return <-o.copyErr
 }

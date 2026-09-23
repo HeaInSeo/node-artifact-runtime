@@ -5,6 +5,18 @@ import (
 	"fmt"
 )
 
+// Run materializes the inputs described by cfg, supervises cfg.Command until
+// it exits, and emits the output manifest. It returns the exit code the
+// calling process should exit with.
+//
+// While Run is active it owns child-process reaping for the whole calling
+// process; see the package documentation. The caller must not start or wait
+// for any other child process while Run is running.
+//
+// Shutdown is bounded, so Run can return while a child that outlived the hard
+// kill deadline is still unreaped. The caller must terminate the process after
+// Run returns and must not reuse it to call Run again or to manage further
+// child processes.
 func Run(ctx context.Context, cfg Config) int {
 	if err := cfg.Validate(); err != nil {
 		_, _ = fmt.Fprintln(stderrOrDefault(cfg.Stderr), err)

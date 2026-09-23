@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
 )
 
@@ -12,7 +11,7 @@ func exitCode(err error) int {
 	if err == nil {
 		return ExitSuccess
 	}
-	var exitErr *exec.ExitError
+	var exitErr *commandExitError
 	if errors.As(err, &exitErr) {
 		return exitErr.ExitCode()
 	}
