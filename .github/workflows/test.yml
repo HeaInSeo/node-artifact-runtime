@@ -71,6 +71,10 @@ jobs:
         if: steps.changes.outputs.docs_only != 'true'
         run: make test
 
+      - name: Build for a non-Linux target
+        if: steps.changes.outputs.docs_only != 'true'
+        run: GOOS=darwin GOARCH=arm64 go build ./...
+
       - name: Run security lint guardrail
         if: steps.changes.outputs.docs_only != 'true'
         run: make lint-security-check
