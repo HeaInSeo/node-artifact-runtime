@@ -17,4 +17,20 @@
 // lose its child's exit status or fail with ECHILD. The node-artifact-runtime
 // binary meets this precondition: it calls Run once per process and starts no
 // other child processes.
+//
+// # Bounded shutdown can leave an unreaped child
+//
+// Shutdown is bounded: after the grace period Run sends SIGKILL to the command's
+// process group and waits only a fixed time for it to exit. A child that
+// outlives that hard deadline (for example one blocked in uninterruptible I/O)
+// is not waited for. Run stops reaping and returns, so when that child finally
+// exits nobody collects its status and it stays a zombie of the calling
+// process.
+//
+// After Run returns, the caller must therefore terminate the process (the
+// node-artifact-runtime binary exits with Run's result). Do not reuse the same
+// process to run Run again or to manage further child processes: an unreaped
+// child from the previous Run may still be present, and its later exit is not
+// handled. This is a library contract, not a guarantee that Run reaps every
+// child it started.
 package runtimehelper
