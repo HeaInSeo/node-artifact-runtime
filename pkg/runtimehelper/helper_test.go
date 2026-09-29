@@ -1270,6 +1270,15 @@ func TestRunExternalSignalIsForwardedAndObservedByChild(t *testing.T) {
 // traps TERM/INT/HUP/QUIT independently so the parent test can tell exactly
 // which signal actually reached the child, rather than inferring it from
 // nan's own exit code.
+//
+// The shell idles in the `wait` builtin on a background sleep, never on a
+// foreground one. nan forwards the signal to the whole process group, and sh
+// defers a trap until its foreground command exits; a foreground sleep hit by
+// SIGQUIT dumps core first, which under a piped core_pattern (apport,
+// systemd-coredump) can outlast ShutdownGracePeriod, so nan escalated to
+// SIGKILL before the trap ran (nan#23). `wait` is interrupted by a trapped
+// signal immediately, and asynchronous sleeps ignore INT/QUIT, so trap timing
+// no longer depends on how a sibling process dies.
 func TestRuntimeHelperSignalTrapSubprocess(t *testing.T) {
 	if os.Getenv("NAN_HELPER_SIGNAL_SUBPROCESS") != "1" {
 		return
@@ -1285,7 +1294,7 @@ trap 'touch %q; exit 0' INT
 trap 'touch %q; exit 0' HUP
 trap 'touch %q; exit 0' QUIT
 echo $$ > %q
-while true; do sleep 0.05; done`,
+while true; do sleep 0.05 & wait $!; done`,
 		filepath.Join(markerDir, "term"),
 		filepath.Join(markerDir, "int"),
 		filepath.Join(markerDir, "hup"),
